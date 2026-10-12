@@ -1,0 +1,211 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Take over Auping Connect",
+        "description": "In the Auping app open **Share configuration**. It shows the IP address and an 8 letter code. You can also paste the QR code text (`IP-code`). No re-pairing needed.",
+        "data": {
+          "host": "IP address of the box",
+          "code": "Code (or QR content)"
+        },
+        "data_description": {
+          "host": "e.g. 192.168.1.50",
+          "code": "The 8 letters from the Auping app."
+        }
+      },
+      "bed": {
+        "title": "Bed settings",
+        "description": "Found: remote {remote}, bed type {bed_type}, firmware {firmware}, sides linked: {sync}.",
+        "data": {
+          "motors": "Motors",
+          "sides_count": "Bed sides",
+          "name_a": "Name side A",
+          "name_b": "Name side B",
+          "mode": "Driving both sides"
+        },
+        "data_description": {
+          "motors": "Which parts can be adjusted.",
+          "name_a": "Control unit A.",
+          "name_b": "Control unit B.",
+          "mode": "Use simultaneous if both sides start in the panel test."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Enter code again",
+        "description": "The box rejects the stored code.",
+        "data": {
+          "code": "Code (or QR content)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The box rejects this code.",
+      "cannot_connect": "Cannot connect to the box.",
+      "invalid_code": "The code consists of letters (usually 8).",
+      "no_host": "Enter the IP address or paste the full QR content.",
+      "no_motors": "Select at least one motor."
+    },
+    "abort": {
+      "already_configured": "This bed is already set up.",
+      "not_auping": "Not an Auping Connect box.",
+      "reauth_successful": "New code saved."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Auping bed",
+        "data": {
+          "host": "IP address of the box",
+          "motors": "Motors",
+          "sides_count": "Bed sides",
+          "name_a": "Name side A",
+          "name_b": "Name side B",
+          "mode": "Driving both sides"
+        },
+        "data_description": {
+          "motors": "Which parts can be adjusted.",
+          "name_a": "Control unit A.",
+          "name_b": "Control unit B.",
+          "mode": "Use simultaneous if both sides start in the panel test."
+        }
+      }
+    },
+    "error": {
+      "no_motors": "Select at least one motor."
+    }
+  },
+  "selector": {
+    "side": {
+      "options": {
+        "both": "Both (synchronized)",
+        "a": "Side A",
+        "b": "Side B"
+      }
+    },
+    "motor": {
+      "options": {
+        "head": "Head",
+        "back": "Back",
+        "lower_back": "Lower back",
+        "legs": "Legs",
+        "feet": "Feet"
+      }
+    },
+    "direction": {
+      "options": {
+        "up": "Up",
+        "down": "Down"
+      }
+    }
+  },
+  "services": {
+    "move_to": {
+      "name": "Move to position",
+      "description": "Moves a motor to a position; both sides synchronized.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        },
+        "side": {
+          "name": "Side",
+          "description": "Which side moves."
+        },
+        "motor": {
+          "name": "Motor",
+          "description": "Which part."
+        },
+        "position": {
+          "name": "Position",
+          "description": "0 = flat, 100 = top."
+        }
+      }
+    },
+    "move": {
+      "name": "Move for time",
+      "description": "Moves a motor for a fixed command time (no compensation).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        },
+        "side": {
+          "name": "Side",
+          "description": "Which side moves."
+        },
+        "motor": {
+          "name": "Motor",
+          "description": "Which part."
+        },
+        "direction": {
+          "name": "Direction",
+          "description": "Up or down."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Command time in ms."
+        }
+      }
+    },
+    "stop": {
+      "name": "Stop",
+      "description": "Stops all motors.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        }
+      }
+    },
+    "flat": {
+      "name": "Flat",
+      "description": "Moves everything down, synchronized.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        }
+      }
+    },
+    "home": {
+      "name": "Reference run",
+      "description": "Moves everything to the bottom end stop and resets positions.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        }
+      }
+    },
+    "goto_favorite": {
+      "name": "Go to favorite",
+      "description": "Moves to a stored position.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        },
+        "slot": {
+          "name": "Favorite",
+          "description": "Slot 1 to 3."
+        }
+      }
+    },
+    "save_favorite": {
+      "name": "Save favorite",
+      "description": "Stores the current position.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        },
+        "slot": {
+          "name": "Favorite",
+          "description": "Slot 1 to 3."
+        }
+      }
+    }
+  }
+}

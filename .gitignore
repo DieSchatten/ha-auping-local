@@ -1,0 +1,13 @@
+# Original-App und alles Dekompilierte bleiben lokal (urheberrechtlich geschützt)
+*.apk
+*.apks
+*.xapk
+# Lokale HA-Testinstanz mit erzeugten Test-Zugängen
+.ha-test/
+# Wird beim Veröffentlichen erzeugt
+custom_components/auping_local/version.json
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+.env

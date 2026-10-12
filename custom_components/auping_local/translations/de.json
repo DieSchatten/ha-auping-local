@@ -1,0 +1,211 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Auping Connect übernehmen",
+        "description": "Öffne in der Auping-App **Konfiguration teilen**. Dort stehen die IP-Adresse und ein 8-stelliger Code. Du kannst auch den Text aus dem QR-Code einfügen (Form `IP-Code`), dann ist die IP-Adresse nicht nötig. Das Bett muss nicht neu angelernt werden.",
+        "data": {
+          "host": "IP-Adresse der Box",
+          "code": "Code (oder QR-Inhalt)"
+        },
+        "data_description": {
+          "host": "Zum Beispiel 192.168.1.50. Am besten im Router fest vergeben.",
+          "code": "Die 8 Buchstaben aus der Auping-App, Leerzeichen sind egal."
+        }
+      },
+      "bed": {
+        "title": "Bett einstellen",
+        "description": "Box gefunden: Fernbedienung {remote}, Bett-Typ {bed_type}, Firmware {firmware}, Seiten gekoppelt: {sync}.",
+        "data": {
+          "motors": "Vorhandene Motoren",
+          "sides_count": "Bettseiten",
+          "name_a": "Name Seite A",
+          "name_b": "Name Seite B",
+          "mode": "Ansteuerung beider Seiten"
+        },
+        "data_description": {
+          "motors": "Welche Teile sich bei dir verstellen lassen.",
+          "name_a": "Steuereinheit A (in der Auping-App die linke Seite).",
+          "name_b": "Steuereinheit B (in der Auping-App die rechte Seite).",
+          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Code erneut eingeben",
+        "description": "Die Box lehnt den gespeicherten Code ab. Bitte den aktuellen Code aus der Auping-App (Konfiguration teilen) eingeben.",
+        "data": {
+          "code": "Code (oder QR-Inhalt)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Die Box lehnt diesen Code ab.",
+      "cannot_connect": "Keine Verbindung zur Box unter dieser Adresse.",
+      "invalid_code": "Der Code besteht aus Buchstaben (normalerweise 8).",
+      "no_host": "Bitte die IP-Adresse angeben oder den kompletten QR-Inhalt einfügen.",
+      "no_motors": "Mindestens einen Motor auswählen."
+    },
+    "abort": {
+      "already_configured": "Dieses Bett ist schon eingerichtet (Adresse/Code wurden aktualisiert).",
+      "not_auping": "Das ist keine Auping-Connect-Box.",
+      "reauth_successful": "Neuer Code gespeichert."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Auping Bett",
+        "data": {
+          "host": "IP-Adresse der Box",
+          "motors": "Vorhandene Motoren",
+          "sides_count": "Bettseiten",
+          "name_a": "Name Seite A",
+          "name_b": "Name Seite B",
+          "mode": "Ansteuerung beider Seiten"
+        },
+        "data_description": {
+          "motors": "Welche Teile sich bei dir verstellen lassen.",
+          "name_a": "Steuereinheit A (in der Auping-App die linke Seite).",
+          "name_b": "Steuereinheit B (in der Auping-App die rechte Seite).",
+          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen."
+        }
+      }
+    },
+    "error": {
+      "no_motors": "Mindestens einen Motor auswählen."
+    }
+  },
+  "selector": {
+    "side": {
+      "options": {
+        "both": "Beide (synchron)",
+        "a": "Seite A",
+        "b": "Seite B"
+      }
+    },
+    "motor": {
+      "options": {
+        "head": "Kopfteil",
+        "back": "Rückenteil",
+        "lower_back": "Lendenteil",
+        "legs": "Beinteil",
+        "feet": "Fußteil"
+      }
+    },
+    "direction": {
+      "options": {
+        "up": "Hoch",
+        "down": "Runter"
+      }
+    }
+  },
+  "services": {
+    "move_to": {
+      "name": "Position anfahren",
+      "description": "Fährt einen Motor auf eine Position in Prozent – bei beiden Seiten synchron.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        },
+        "side": {
+          "name": "Seite",
+          "description": "Welche Seite fahren soll."
+        },
+        "motor": {
+          "name": "Motor",
+          "description": "Welches Teil des Lattenrosts."
+        },
+        "position": {
+          "name": "Position",
+          "description": "0 = flach, 100 = ganz oben."
+        }
+      }
+    },
+    "move": {
+      "name": "Fahren für Zeit",
+      "description": "Fährt einen Motor für eine feste Befehlszeit (ohne Ausgleich).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        },
+        "side": {
+          "name": "Seite",
+          "description": "Welche Seite fahren soll."
+        },
+        "motor": {
+          "name": "Motor",
+          "description": "Welches Teil des Lattenrosts."
+        },
+        "direction": {
+          "name": "Richtung",
+          "description": "Hoch oder runter."
+        },
+        "duration": {
+          "name": "Dauer",
+          "description": "Befehlszeit in Millisekunden."
+        }
+      }
+    },
+    "stop": {
+      "name": "Stopp",
+      "description": "Hält sofort alle Motoren an.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        }
+      }
+    },
+    "flat": {
+      "name": "Alles flach",
+      "description": "Fährt alle Teile synchron ganz nach unten.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        }
+      }
+    },
+    "home": {
+      "name": "Referenzfahrt",
+      "description": "Fährt alles sicher bis zum Endschalter runter und setzt die Positionen auf 0.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        }
+      }
+    },
+    "goto_favorite": {
+      "name": "Favorit anfahren",
+      "description": "Fährt eine gespeicherte Lage synchron an.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        },
+        "slot": {
+          "name": "Favorit",
+          "description": "Speicherplatz 1 bis 3."
+        }
+      }
+    },
+    "save_favorite": {
+      "name": "Favorit speichern",
+      "description": "Speichert die aktuelle Lage beider Seiten.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        },
+        "slot": {
+          "name": "Favorit",
+          "description": "Speicherplatz 1 bis 3."
+        }
+      }
+    }
+  }
+}
