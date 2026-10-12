@@ -1,3 +1,5 @@
+![Bett lokal – Auping Connect in Home Assistant](https://raw.githubusercontent.com/DieSchatten/ha-auping-local/main/docs/banner.png)
+
 # Auping Bett (lokal) – Home-Assistant-Integration
 
 Steuert Auping-Betten mit der WLAN-Box **Auping Connect** direkt im Heimnetz – ohne Auping-Cloud, ohne
