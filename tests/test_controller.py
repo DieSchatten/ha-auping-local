@@ -1,7 +1,8 @@
 """Tests der Sync-Logik gegen eine simulierte Box.
 
 Standardszenario wie beim echten Bett: Beide Motoren sind gleich schnell, aber
-Seite B läuft später an (Totweg). Ein zweites Szenario prüft unterschiedliche
+der Motor von Seite B läuft beim Hochfahren aus der flachen Lage länger leer
+(Leerweg), bevor er den Rost anhebt. Ein zweites Szenario prüft unterschiedliche
 Geschwindigkeiten.
 """
 
@@ -35,11 +36,9 @@ SPEED = {
     "legs": {"up": 1500, "down": 1400},
 }
 TRUE = {"a": copy.deepcopy(SPEED), "b": copy.deepcopy(SPEED)}
-LAG = {
-    "a": {"head": {"up": 0, "down": 0}, "back": {"up": 100, "down": 150}, "legs": {"up": 100, "down": 100}},
-    "b": {"head": {"up": 0, "down": 0}, "back": {"up": 500, "down": 350}, "legs": {"up": 300, "down": 300}},
-}
-# Zweites Szenario: B ist langsamer, kein Anlaufunterschied
+# Leerweg unten in ms
+GAP = {"a": {"head": 0, "back": 100, "legs": 100}, "b": {"head": 0, "back": 500, "legs": 300}}
+# Zweites Szenario: B ist langsamer, kein Leerweg
 SLOW_B = {
     "a": copy.deepcopy(SPEED),
     "b": {
@@ -75,25 +74,31 @@ def make(
     mode=MODE_PARALLEL,
     parallel_box=True,
     travel=TRUE,
-    lag=LAG,
+    gap=GAP,
     calibrate_travel=True,
-    calibrate_lag=True,
+    calibrate_gap=True,
     start=0.0,
 ):
-    sim = SimBox(copy.deepcopy(travel), parallel=parallel_box, lag=copy.deepcopy(lag))
+    sim = SimBox(copy.deepcopy(travel), parallel=parallel_box, gap=copy.deepcopy(gap))
     ctl = BedController(FakeApi(sim), ["a", "b"], MOTORS, mode=mode)
     for s in ("a", "b"):
         for m in MOTORS:
             if calibrate_travel:
                 ctl.calibration[s][m]["up"] = travel[s][m]["up"]
                 ctl.calibration[s][m]["down"] = travel[s][m]["down"]
-            if calibrate_lag:
-                ctl.calibration[s][m]["lag_up"] = lag[s][m]["up"]
-                ctl.calibration[s][m]["lag_down"] = lag[s][m]["down"]
-            ctl.state[s][m].pos = start
-            ctl.state[s][m].known = True
-            sim.motors[s][m].pos = start
+            if calibrate_gap:
+                ctl.calibration[s][m]["gap"] = gap.get(s, {}).get(m, 0)
+            set_pos(ctl, sim, s, m, start)
     return ctl, sim
+
+
+def set_pos(ctl: BedController, sim: SimBox, side: str, motor: str, pos: float) -> None:
+    """Simuliertes Bett und Schätzung auf dieselbe Lage setzen (unten: Leerweg offen)."""
+    st = ctl.state[side][motor]
+    st.pos, st.known, st.direction = pos, True, 0
+    st.at_end = DOWN if pos <= 0 else UP if pos >= 1 else 0
+    st.slack = ctl.gap_ms(side, motor) if pos <= 0 else 0.0
+    sim.set_position(side, motor, pos)
 
 
 async def settle(ctl: BedController, sim: SimBox, timeout: float = 20.0) -> None:
@@ -163,7 +168,7 @@ def test_split_long_commands():
 
 async def test_without_compensation_late_side_stays_behind():
     """Ausgangsproblem: B läuft später an und bleibt ohne Ausgleich zurück."""
-    ctl, sim = make(calibrate_lag=False)
+    ctl, sim = make(calibrate_gap=False)
     await ctl.move_to({"a": {"back": 0.5}, "b": {"back": 0.5}})
     await settle(ctl, sim)
     assert diff(sim) > 0.15
@@ -241,7 +246,7 @@ async def test_hold_down_from_top():
 
 
 async def test_different_speeds_are_compensated_too():
-    ctl, sim = make(travel=SLOW_B, lag={}, calibrate_lag=False)
+    ctl, sim = make(travel=SLOW_B, gap={}, calibrate_gap=False)
     await ctl.move_to({"a": {"back": 0.6}, "b": {"back": 0.6}})
     await settle(ctl, sim)
     assert abs(diff(sim)) < 0.02
@@ -276,7 +281,7 @@ async def test_flat_and_home():
             assert ctl.position(s, m) == 0.0
             assert ctl.state[s][m].known
     # Unbekannte Lage: Schätzung sagt 0, in Wahrheit steht B auf 0.7
-    sim.motors["b"]["back"].pos = 0.7
+    sim.set_position("b", "back", 0.7)
     ctl.state["b"]["back"].known = False
     await ctl.home()
     await settle(ctl, sim)
@@ -367,7 +372,7 @@ def test_old_favorite_format_is_migrated():
         "1": {"name": "Favorit 1", "positions": {"a": {"back": 0.4}, "b": {"back": 0.5}}}
     }
     data = ctl.export_state()
-    ctl2, _ = make(calibrate_travel=False, calibrate_lag=False)
+    ctl2, _ = make(calibrate_travel=False, calibrate_gap=False)
     ctl2.import_state(data)
     assert ctl2.favorites == ctl.favorites
     assert ctl2.calibration == ctl.calibration
@@ -396,8 +401,7 @@ async def test_endpoint_not_driven_again():
 
 def set_both(ctl, sim, motor, a, b):
     for side, pos in (("a", a), ("b", b)):
-        ctl.state[side][motor].pos = pos
-        sim.motors[side][motor].pos = pos
+        set_pos(ctl, sim, side, motor, pos)
 
 
 async def test_single_mattress_limits_one_side():
@@ -498,10 +502,7 @@ async def test_measure_full_travel():
 
 def at_bottom(ctl: BedController, sim: SimBox, motor: str = "back") -> None:
     for s in ("a", "b"):
-        ctl.state[s][motor].pos = 0.0
-        ctl.state[s][motor].known = True
-        ctl.state[s][motor].at_end = DOWN
-        sim.motors[s][motor].pos = 0.0
+        set_pos(ctl, sim, s, motor, 0.0)
 
 
 async def hold(ctl: BedController, sides, motor: str, direction: int, seconds: float) -> None:
@@ -510,39 +511,62 @@ async def hold(ctl: BedController, sides, motor: str, direction: int, seconds: f
     await ctl.stop_motor(sides, motor)
 
 
-async def test_adjust_learns_start_offset():
+async def test_adjust_learns_gap():
     """Ablauf wie vom Benutzer gewünscht: flach -> beide hoch -> zurückliegende Seite nachfahren -> passt."""
-    ctl, sim = make(calibrate_lag=False)
+    ctl, sim = make(calibrate_gap=False)
     at_bottom(ctl, sim)
     with pytest.raises(ValueError):
         ctl.adjust_start("back")  # noch nicht gefahren
-    await hold(ctl, ["a", "b"], "back", UP, 1.6)
+    await hold(ctl, ["a", "b"], "back", UP, 1.2)
     await settle(ctl, sim)
-    assert diff(sim) > 0.15  # B (später anlaufend) liegt zurück
+    assert diff(sim) > 0.15  # B (längerer Leerweg) liegt zurück
     ctl.adjust_start("back")
-    # Benutzer fährt B nach, bis beide gleich hoch sind (mit B's eigenem Anlauf)
-    needed = diff(sim) * 2000 / 1000 + 0.5
-    await hold(ctl, ["b"], "back", UP, needed)
+    # Benutzer fährt B aus der Zwischenlage nach – dort gibt es keinen Leerweg
+    await hold(ctl, ["b"], "back", UP, diff(sim) * 2000 / 1000)
     await settle(ctl, sim)
     assert abs(diff(sim)) < 0.02
     result = await ctl.adjust_finish(apply=True)
-    found = ctl.calibration["b"]["back"]["lag_up"] - ctl.calibration["a"]["back"]["lag_up"]
-    assert result["side"] == "b" and abs(found - 400) < 90, result
+    found = ctl.gap_ms("b", "back") - ctl.gap_ms("a", "back")
+    assert result["side"] == "b" and abs(found - 400) < 50, result
     assert abs(ctl.position("a", "back") - ctl.position("b", "back")) < 0.001
-    # Danach fahren beide im Gleichschritt (kurz, damit keine Seite oben anschlägt)
-    await hold(ctl, ["a", "b"], "back", UP, 0.6)
+    # Aus der Zwischenlage weiter hoch: kein Ausgleich nötig, beide bleiben gleich
+    await hold(ctl, ["a", "b"], "back", UP, 0.3)
     await settle(ctl, sim)
-    # Restfehler ≈ halber Anlauf der früheren Seite (50 ms): bei 2 s Hub 2,5 %, beim echten Bett ~0,2 %
-    assert abs(diff(sim)) < 0.05
-    # Und noch einmal nachjustieren macht es genauer
-    ctl.adjust_start("back")
-    await ctl.adjust_finish(apply=True)
+    assert abs(diff(sim)) < 0.02
+    # Und aus der flachen Lage heben beide jetzt gleichzeitig an
+    await ctl.flat()
+    await settle(ctl, sim)
+    await hold(ctl, ["a", "b"], "back", UP, 1.0)
+    await settle(ctl, sim)
+    assert 0.2 < sim.position("a", "back") < 0.6
+    assert abs(diff(sim)) < 0.02
+    await ctl.async_shutdown()
+
+
+async def test_midway_restart_needs_no_offset():
+    """Hochfahren aus einer Zwischenlage: beide Motoren liegen an, keiner wird verzögert."""
+    ctl, sim = make()
+    await ctl.move_to({"a": {"back": 0.3}, "b": {"back": 0.3}})
+    await settle(ctl, sim)
+    assert abs(diff(sim)) < 0.02
+    sent = len(sim.log)
+    await ctl.move_to({"a": {"back": 0.6}, "b": {"back": 0.6}})
+    await settle(ctl, sim)
+    starts = [ts for ts, _, b in sim.log[sent:] if b["motor_2"]["Action"] == 1]
+    assert max(starts) - min(starts) < 0.1, "kein künstlicher Startversatz in der Zwischenlage"
+    assert abs(sim.position("a", "back") - 0.6) < 0.02 and abs(diff(sim)) < 0.02
+    # Runter und wieder hoch aus der Zwischenlage: ebenfalls gleich
+    await hold(ctl, ["a", "b"], "back", DOWN, 0.4)
+    await settle(ctl, sim)
+    await hold(ctl, ["a", "b"], "back", UP, 0.4)
+    await settle(ctl, sim)
+    assert abs(diff(sim)) < 0.02
     await ctl.async_shutdown()
 
 
 async def test_adjust_after_flat_even_during_overrun():
     """Nach „Alles flach“ sofort hochfahren, obwohl der Nachlauf noch läuft – Bezug muss stimmen."""
-    ctl, sim = make(calibrate_lag=False, start=0.5)
+    ctl, sim = make(calibrate_gap=False, start=0.5)
     await ctl.flat()
     await asyncio.sleep(1.05)  # unten angekommen (0,9 s), Nachlauf läuft noch bis 1,3 s
     assert ctl.any_moving()
@@ -553,25 +577,19 @@ async def test_adjust_after_flat_even_during_overrun():
     await ctl.async_shutdown()
 
 
-async def test_adjust_down_from_top():
-    ctl, sim = make(calibrate_lag=False, start=1.0)
-    for s in ("a", "b"):
-        ctl.state[s]["back"].at_end = UP
-    await hold(ctl, ["a", "b"], "back", DOWN, 1.4)
+async def test_adjust_from_top_explains_flat():
+    """Von oben gibt es keinen Leerweg – Nachjustieren sagt, wie es richtig geht."""
+    ctl, sim = make(calibrate_gap=False, start=1.0)
+    await hold(ctl, ["a", "b"], "back", DOWN, 0.6)
     await settle(ctl, sim)
-    assert diff(sim) < -0.08  # B fährt später los, steht also höher
     ctl.adjust_start("back")
-    needed = -diff(sim) * 1800 / 1000 + 0.35
-    await hold(ctl, ["b"], "back", DOWN, needed)
-    await settle(ctl, sim)
-    await ctl.adjust_finish(apply=True)
-    found = ctl.calibration["b"]["back"]["lag_down"] - ctl.calibration["a"]["back"]["lag_down"]
-    assert abs(found - 200) < 90
+    with pytest.raises(ValueError, match="flachen Lage"):
+        await ctl.adjust_finish(apply=True)
     await ctl.async_shutdown()
 
 
 async def test_adjust_needs_level_reference():
-    ctl, sim = make(calibrate_lag=False, start=0.4)
+    ctl, sim = make(calibrate_gap=False, start=0.4)
     for s in ("a", "b"):
         ctl.state[s]["back"].at_end = 0
     await hold(ctl, ["a", "b"], "back", UP, 0.5)
@@ -582,28 +600,30 @@ async def test_adjust_needs_level_reference():
 
 
 async def test_adjust_cancel_changes_nothing():
-    ctl, sim = make(calibrate_lag=False)
+    ctl, sim = make(calibrate_gap=False)
     at_bottom(ctl, sim)
     await hold(ctl, ["a", "b"], "back", UP, 0.8)
     await settle(ctl, sim)
     ctl.adjust_start("back")
     assert ctl.snapshot()["adjust"] == {"motor": "back"}
     assert await ctl.adjust_finish(apply=False) == {}
-    assert ctl.calibration["b"]["back"]["lag_up"] == 0
+    assert ctl.gap_ms("b", "back") == 0
     await ctl.async_shutdown()
 
 
 async def test_fine_tune_and_test_move():
     ctl, sim = make(start=0.3)
-    ctl.shift_lag("back", UP, 100)  # "Links fuhr zuerst los": A bekommt mehr Verzögerung
-    assert ctl.calibration["b"]["back"]["lag_up"] - ctl.calibration["a"]["back"]["lag_up"] == 500
-    ctl.shift_lag("back", UP, -100)
-    await ctl.calib_test_move("back", UP)
+    with pytest.raises(ValueError, match="flachen Lage"):
+        await ctl.calib_test_move("back")
+    ctl.shift_gap("back", 100)  # "Links fuhr zuerst los": B bekommt mehr Leerweg
+    assert ctl.gap_ms("b", "back") - ctl.gap_ms("a", "back") == 500
+    ctl.shift_gap("back", -100)
+    await ctl.flat()
     await settle(ctl, sim)
-    assert abs(sim.position("a", "back") - (0.3 + 3000 / 2000)) < 0.05 or sim.position("a", "back") == 1.0
-    assert abs(diff(sim)) < 0.03
-    with pytest.raises(ValueError, match="ganz oben"):
-        await ctl.calib_test_move("back", UP)
+    await ctl.calib_test_move("back", ms=600)
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.3) < 0.03
+    assert abs(diff(sim)) < 0.02
     await ctl.async_shutdown()
 
 
@@ -626,6 +646,7 @@ async def test_relevel_can_be_skipped():
     ctl, sim = make(calibrate_travel=False, start=0.0)
     for s in ("a", "b"):
         ctl.state[s]["back"].known = False  # Lage unbekannt -> würde lange runterfahren
+        ctl.state[s]["back"].at_end = 0
     await ctl.calib_measure_start("back", UP)
     await asyncio.sleep(0.3)
     assert ctl.snapshot()["relevel"] and ctl.snapshot()["motion_remaining"] > 10

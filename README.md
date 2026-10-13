@@ -3,8 +3,9 @@
 # Auping Bett (lokal) – Home-Assistant-Integration
 
 Steuert Auping-Betten mit der WLAN-Box **Auping Connect** direkt im Heimnetz – ohne Auping-Cloud, ohne
-Auping-App. Dazu ein **Sync-Ausgleich für zwei Lattenroste**: Wenn ein Motor später anläuft als der
-andere (Totweg), fahren beide Seiten trotzdem im Gleichschritt und kommen auf derselben Höhe an.
+Auping-App. Dazu ein **Sync-Ausgleich für zwei Lattenroste**: Läuft ein Motor beim Hochfahren aus der
+flachen Lage länger leer als der andere, bevor er den Rost anhebt (Leerweg), fahren beide Seiten
+trotzdem im Gleichschritt und kommen auf derselben Höhe an.
 
 > Inoffizielles Projekt, keine Verbindung zu Auping. Das Protokoll wurde zur Interoperabilität aus der
 > Auping-Connect-App 2.4.4 nachvollzogen (siehe [PROTOKOLL.md](PROTOKOLL.md)). Benutzung auf eigene Gefahr.
@@ -23,9 +24,8 @@ andere (Totweg), fahren beide Seiten trotzdem im Gleichschritt und kommen auf de
 - **Matratzenmodus**: Bei *einer durchgehenden Matratze* darf eine Seite allein höchstens einen
   einstellbaren Abstand (Standard 10 % des Verstellwegs) von der anderen haben – hält man länger, bleibt
   der Motor an der Grenze stehen. Bei *zwei Einzelmatratzen* sind die Seiten frei verstellbar.
-- **Nachjustieren** statt Stoppuhr: aus einer Lage, in der beide Seiten gleich hoch stehen (z. B. flach),
-  mit „Beide“ ein Stück fahren, die zurückliegende Seite einzeln nachfahren, „Passt jetzt“ – daraus
-  berechnet die Integration den Startversatz. Jederzeit wiederholbar, wird mit jeder Runde genauer.
+- **Nachjustieren** statt Stoppuhr: „Alles flach“, mit „Beide“ ein Stück hochfahren, die zurückliegende
+  Seite einzeln nachfahren, „Passt jetzt“ – daraus berechnet die Integration den Leerweg-Unterschied.
 - **Entitäten für Automationen**: je Motor eine Abdeckung (`cover`) pro Seite und eine für beide Seiten
   synchron, mit Position in Prozent; Tasten (`button`) für Flach, Referenzfahrt, Stopp und je Favorit;
   Auswahl `Favorit` (zeigt den gerade eingestellten Favoriten) und `Matratze`; Kalibrierwerte und
@@ -69,26 +69,29 @@ der Integration anpassen.
    der Motor am Anschlag stehen bleibt. Ohne Messung nimmt die Integration 25 s für den ganzen Weg an –
    dann stimmen die Prozentwerte nur ungefähr, und bei deutlich längeren Motoren erreicht „Alles flach“
    den Anschlag eventuell nicht ganz.
-3. **Startversatz nachjustieren** – je Motor und Richtung:
-   1. „Alles flach“ (für die Richtung *runter*: beide ganz hoch fahren).
-   2. Mit „Beide“ ein Stück hoch (bzw. runter) fahren.
+3. **Leerweg nachjustieren** – je Motor:
+   1. „Alles flach“.
+   2. Mit „Beide“ ein Stück hochfahren.
    3. Beim Motor auf „Nachjustieren“ tippen, die zurückliegende Seite mit ihren eigenen Tasten nachfahren,
       bis beide gleich hoch sind, „Passt jetzt“.
-   Zum Prüfen gibt es unter *Kalibrieren* eine Testfahrt und Knöpfe für Feinkorrekturen in 0,1-s-Schritten.
+   Zum Prüfen gibt es unter *Kalibrieren* eine Testfahrt aus der flachen Lage und Knöpfe für
+   Feinkorrekturen in 0,1-s-Schritten.
 
 ## Wie der Ausgleich funktioniert
 
 Die Box kennt keine Positionen, nur „Motor X für N Millisekunden hoch/runter“ – je Steuereinheit (Seite A
-und B) getrennt. Die Integration rechnet die Position mit und kennt je Seite, Motor und Richtung:
+und B) getrennt. Die Integration rechnet die Position mit und kennt je Seite und Motor:
 
-- **Anlauf** – Zeit vom Befehl bis der Rost sich tatsächlich bewegt (Totweg),
-- **Laufzeit** – Dauer von ganz unten bis ganz oben bei laufendem Motor.
+- **Leerweg unten** – In der flachen Lage liegt der Rost auf, der Motor fährt aber noch weiter zurück.
+  Beim Hochfahren läuft er diesen Weg erst leer, bevor er schiebt. Aus einer Zwischenlage und beim
+  Runterfahren gibt es keinen Leerweg, denn dort liegt der Rost am Motor an.
+- **Laufzeit** – Dauer von ganz unten bis ganz oben (bzw. zurück) bei anliegendem Motor.
 
-Bei einer Synchronfahrt startet die Seite mit dem kürzeren Anlauf um genau die Differenz später, und jede
-Seite bekommt `Anlauf + Strecke × Laufzeit`. Beide Roste bewegen sich dadurch gleichzeitig und halten
-gleichzeitig an. Lässt du die Taste los, holt eine eventuell zurückliegende Seite noch auf. Fahrten in eine
-Endlage bekommen etwas Nachlauf, damit der Endschalter sicher erreicht wird – dabei wird die Position neu
-genullt.
+Fahren beide Seiten aus der flachen Lage hoch, startet die Seite mit dem kürzeren Leerweg um genau die
+Differenz später; jede Seite bekommt `Leerweg + Strecke × Laufzeit`. Beide Roste heben dadurch gleichzeitig
+an und halten gleichzeitig an. Lässt du die Taste los, holt eine eventuell zurückliegende Seite noch auf.
+Fahrten nach ganz unten bekommen Nachlauf plus Leerweg, damit der Motor immer ganz zurückfährt und der
+Leerweg beim nächsten Hochfahren gleich groß ist.
 
 ### Grenzen
 

@@ -82,7 +82,7 @@ REFRESH_BEFORE_MS = 1000
 DEFAULT_TRAVEL_MS = 25000
 MIN_TRAVEL_MS = 1000
 MAX_TRAVEL_MS = 120000
-MAX_LAG_MS = 5000
+MAX_GAP_MS = 8000  # Leerweg unten: so lange läuft ein Motor höchstens, bevor er den Rost anhebt
 
 # Nachlauf an den Endlagen, damit der Motor sicher den Endschalter erreicht.
 OVERRUN_FACTOR = 0.15

@@ -172,7 +172,7 @@ async def ws_command(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         elif action == "nudge":
             await ctl.nudge(d["side"], d["motor"], _dir(d["direction"]), int(d["ms"]))
         elif action == "set_calibration":
-            if d["key"] not in ("up", "down", "lag_up", "lag_down"):
+            if d["key"] not in ("up", "down", "gap"):
                 raise ValueError("unbekannter Kalibrierwert")
             ctl.set_calibration(d["side"], d["motor"], d["key"], float(d["value"]))
         elif action == "set_position":
@@ -198,9 +198,9 @@ async def ws_command(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         elif action == "adjust_finish":
             result = await ctl.adjust_finish(bool(d.get("apply", True)))
         elif action == "test_move":
-            await ctl.calib_test_move(d["motor"], _dir(d["direction"]))
-        elif action == "shift_lag":
-            ctl.shift_lag(d["motor"], _dir(d["direction"]), float(d["delta"]))
+            await ctl.calib_test_move(d["motor"])
+        elif action == "shift_gap":
+            ctl.shift_gap(d["motor"], float(d["delta"]))
         elif action == "set_names":
             from . import apply_names  # erst zur Laufzeit, sonst Kreisimport
 

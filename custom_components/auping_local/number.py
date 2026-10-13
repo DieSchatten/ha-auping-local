@@ -1,19 +1,19 @@
-"""Kalibrierwerte als Konfigurations-Entitäten (Anlaufverzögerung, Vollhub-Laufzeit)."""
+"""Kalibrierwerte als Konfigurations-Entitäten (Leerweg unten, Vollhub-Laufzeit)."""
 
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import apply_mattress
-from .const import MAX_LAG_MS, MAX_TRAVEL_MS, MIN_TRAVEL_MS, MOTOR_NAMES
+from .const import MAX_GAP_MS, MAX_TRAVEL_MS, MIN_TRAVEL_MS, MOTOR_NAMES
 from .entity import AupingEntity
 
 KEYS = {
-    "lag_up": ("Anlauf hoch", 0, MAX_LAG_MS),
-    "lag_down": ("Anlauf runter", 0, MAX_LAG_MS),
+    "gap": ("Leerweg unten", 0, MAX_GAP_MS),
     "up": ("Laufzeit hoch", MIN_TRAVEL_MS, MAX_TRAVEL_MS),
     "down": ("Laufzeit runter", MIN_TRAVEL_MS, MAX_TRAVEL_MS),
 }
@@ -21,6 +21,11 @@ KEYS = {
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     ctl = entry.runtime_data.controller
+    # Entitäten "Anlauf hoch/runter" aus Version 0.3 entfernen
+    registry = er.async_get(hass)
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if reg_entry.domain == "number" and reg_entry.unique_id.endswith(("_lag_up", "_lag_down")):
+            registry.async_remove(reg_entry.entity_id)
     entities: list[NumberEntity] = [
         AupingCalibrationNumber(entry, side, motor, key)
         for side in ctl.sides
@@ -45,9 +50,9 @@ class AupingCalibrationNumber(AupingEntity, NumberEntity):
         self._label = label
         self._attr_native_min_value = lo / 1000
         self._attr_native_max_value = hi / 1000
-        self._attr_icon = "mdi:timer-cog-outline" if key.startswith("lag") else "mdi:timer-outline"
+        self._attr_icon = "mdi:timer-cog-outline" if key == "gap" else "mdi:timer-outline"
         # Laufzeiten sind nur für die Prozentanzeige wichtig – standardmäßig ausgeblendet.
-        self._attr_entity_registry_enabled_default = key.startswith("lag")
+        self._attr_entity_registry_enabled_default = key == "gap"
 
     @property
     def name(self) -> str:

@@ -3,17 +3,20 @@
 Bewusst ohne Home-Assistant-Abhängigkeiten, damit sich alles mit pytest gegen
 eine simulierte Box testen lässt.
 
-Modell je Seite, Motor und Richtung
------------------------------------
-* ``lag``    – Anlaufverzögerung: so lange dauert es nach dem Befehl, bis sich
-               der Lattenrost tatsächlich bewegt (Totweg/Totzeit).
-* ``travel`` – Vollhub-Laufzeit bei laufendem Motor (0 % -> 100 %).
+Modell je Seite und Motor
+-------------------------
+* ``gap``  – Leerweg unten (ms): In der flachen Lage liegt der Rost auf, der Motor
+             fährt aber noch weiter zurück. Beim Hochfahren aus der flachen Lage läuft
+             er erst diesen Weg leer, bevor er den Rost anhebt. Aus einer Zwischenlage
+             und beim Runterfahren gibt es keinen Leerweg (der Rost liegt am Motor an).
+* ``up`` / ``down`` – Vollhub-Laufzeit bei anliegendem Motor (0 % -> 100 %).
 
 Die Connect-Box kennt keine Positionen, nur "Motor X für N ms hoch/runter".
-Positionen werden deshalb als Anteil 0..1 mitgerechnet. Bei einer Synchronfahrt
-startet die Seite mit der kürzeren Anlaufverzögerung um die Differenz später,
-und jede Seite bekommt ``lag + Strecke · travel`` als Laufzeit. So bewegen sich
-beide Seiten im Gleichschritt und kommen auf derselben Höhe an.
+Positionen werden deshalb als Anteil 0..1 mitgerechnet, dazu je Seite der gerade
+offene Leerweg (``slack``). Bei einer Synchronfahrt startet die Seite mit weniger
+offenem Leerweg um die Differenz später, und jede Seite bekommt
+``Leerweg + Strecke · Laufzeit`` als Befehlszeit. So bewegen sich beide Roste im
+Gleichschritt und kommen auf derselben Höhe an.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from .const import (
     DOWN,
     MAX_FAVORITES,
     MAX_COMMAND_MS,
-    MAX_LAG_MS,
+    MAX_GAP_MS,
     MATTRESS_DUAL,
     MATTRESS_SINGLE,
     MAX_TRAVEL_MS,
@@ -73,10 +76,6 @@ def _dkey(direction: int) -> str:
     return "up" if direction == UP else "down"
 
 
-def _lkey(direction: int) -> str:
-    return "lag_up" if direction == UP else "lag_down"
-
-
 @dataclass
 class MotorState:
     pos: float = 0.0  # Position am Ankerzeitpunkt, 0 = unten, 1 = oben
@@ -87,6 +86,7 @@ class MotorState:
     end: float = 0.0  # hier schaltet die Box ab
     endpoint: bool = False  # Fahrt zielt mit Nachlauf auf eine Endlage
     at_end: int = 0  # UP/DOWN: letzte Fahrt ist sicher an dieser Endlage angekommen
+    slack: float = 0.0  # gerade offener Leerweg (ms), nur in der flachen Lage > 0
     # Fahrten seit der letzten Lage, in der beide Seiten gleich hoch standen:
     # [Richtung, Befehlszeitpunkt, Abschaltzeitpunkt]
     trail: list[list[float]] = field(default_factory=list)
@@ -130,7 +130,7 @@ class BedController:
         self._limit_hit: tuple[float, str] | None = None
         self.calibration: dict[str, dict[str, dict[str, float]]] = {
             s: {
-                m: {"up": DEFAULT_TRAVEL_MS, "down": DEFAULT_TRAVEL_MS, "lag_up": 0.0, "lag_down": 0.0}
+                m: {"up": DEFAULT_TRAVEL_MS, "down": DEFAULT_TRAVEL_MS, "gap": 0.0}
                 for m in self.motors
             }
             for s in self.sides
@@ -208,7 +208,12 @@ class BedController:
             "calibration": self.calibration,
             "positions": {
                 s: {
-                    m: {"pos": round(self.position(s, m, now), 4), "known": st.known, "at_end": st.at_end}
+                    m: {
+                        "pos": round(self.position(s, m, now), 4),
+                        "known": st.known,
+                        "at_end": st.at_end,
+                        "slack": round(self._slack_at(s, m, now)),
+                    }
                     for m, st in motors.items()
                 }
                 for s, motors in self.state.items()
@@ -225,17 +230,22 @@ class BedController:
                     for key in ("up", "down"):
                         if key in vals:
                             self.calibration[s][m][key] = _clamp_travel(vals[key])
-                    for key in ("lag_up", "lag_down"):
-                        if key in vals:
-                            self.calibration[s][m][key] = _clamp_lag(vals[key])
+                    if "gap" in vals:
+                        self.calibration[s][m]["gap"] = _clamp_gap(vals["gap"])
+                    elif "lag_up" in vals:  # Version 0.3: Anlauf beim Hochfahren ~ Leerweg
+                        self.calibration[s][m]["gap"] = _clamp_gap(vals["lag_up"])
         for s, motors in (data.get("positions") or {}).items():
             for m, vals in motors.items():
                 if s in self.state and m in self.state[s]:
-                    self.state[s][m] = MotorState(
+                    st = MotorState(
                         pos=min(1.0, max(0.0, float(vals.get("pos", 0.0)))),
                         known=bool(vals.get("known", False)),
                         at_end=int(vals.get("at_end", 0)),
+                        slack=float(vals.get("slack", 0.0)),
                     )
+                    if "slack" not in vals and st.at_end == DOWN:
+                        st.slack = self.calibration[s][m]["gap"]
+                    self.state[s][m] = st
         for fav_id, fav in (data.get("favorites") or {}).items():
             if not fav:
                 continue  # leerer Platz aus Version 0.1
@@ -248,8 +258,21 @@ class BedController:
     def travel_ms(self, side: str, motor: str, direction: int) -> float:
         return self.calibration[side][motor][_dkey(direction)]
 
-    def lag_ms(self, side: str, motor: str, direction: int) -> float:
-        return self.calibration[side][motor][_lkey(direction)]
+    def gap_ms(self, side: str, motor: str) -> float:
+        return self.calibration[side][motor]["gap"]
+
+    def _slack_at(self, side: str, motor: str, at: float) -> float:
+        """Offener Leerweg (ms) zum Zeitpunkt ``at``, ohne den Zustand zu ändern."""
+        st = self.state[side][motor]
+        if not st.direction:
+            return st.slack
+        end_time = min(at, st.end)
+        if st.direction == UP:
+            return max(0.0, (st.move_start - end_time) * 1000)
+        raw = self._raw_position(side, motor, end_time)
+        if raw < 0:
+            return min(self.gap_ms(side, motor), st.slack + (-raw) * self.travel_ms(side, motor, DOWN))
+        return st.slack
 
     def _raw_position(self, side: str, motor: str, now: float) -> float:
         st = self.state[side][motor]
@@ -275,17 +298,23 @@ class BedController:
         return any(self.is_moving(s, m, now) for s in self.sides for m in self.motors)
 
     def _start_delay_ms(self, side: str, motor: str, direction: int, at: float) -> float:
-        """Wie lange nach einem Befehl zum Zeitpunkt ``at`` vergeht, bis der Rost fährt."""
+        """Wie lange nach einem Befehl zum Zeitpunkt ``at`` vergeht, bis sich der Rost bewegt.
+
+        Nur beim Hochfahren mit offenem Leerweg (aus der flachen Lage) > 0.
+        """
         st = self.state[side][motor]
         if st.direction == direction and at < st.end:
-            return max(0.0, (st.move_start - at) * 1000)  # läuft schon: kein neuer Anlauf
-        return self.lag_ms(side, motor, direction)
+            return max(0.0, (st.move_start - at) * 1000)  # läuft schon weiter
+        if direction == DOWN:
+            return 0.0
+        return self._slack_at(side, motor, at)
 
     def _settle(self, side: str, motor: str, now: float) -> None:
         st = self.state[side][motor]
         if st.direction == 0:
             return
         finished = now >= st.end
+        st.slack = self._slack_at(side, motor, now)
         st.pos = self.position(side, motor, now)
         if st.trail and st.trail[-1][2] > now:
             st.trail[-1][2] = now  # vorzeitig angehalten
@@ -366,7 +395,7 @@ class BedController:
                     st.at_end = 0
                     st.direction = direction
                     st.start = started
-                    st.move_start = started + self.lag_ms(side, motor, direction) / 1000
+                    st.move_start = started + (st.slack / 1000 if direction == UP else 0.0)
                     st.end = started + ms / 1000
                     st.endpoint = step.endpoints.get(motor, False)
                     st.trail.append([direction, started, st.end])
@@ -404,7 +433,10 @@ class BedController:
                     continue  # steht nachweislich schon am Endschalter
                 if x <= 0.0:
                     t = self.travel_ms(side, motor, DOWN)
-                    plan[motor] = (DOWN, (1.0 if hold else p) * t + overrun_ms(t), True)
+                    # Nachlauf + Leerweg: der Motor soll ganz zurückfahren, damit der Leerweg
+                    # beim nächsten Hochfahren immer gleich groß ist.
+                    extra = overrun_ms(t) + self.gap_ms(side, motor)
+                    plan[motor] = (DOWN, (1.0 if hold else p) * t + extra, True)
                 elif x >= 1.0:
                     t = self.travel_ms(side, motor, UP)
                     plan[motor] = (UP, (1.0 if hold else 1.0 - p) * t + overrun_ms(t), True)
@@ -421,15 +453,21 @@ class BedController:
                     plan[motor] = (st.direction, max(0.0, remaining), st.endpoint)
         return plan
 
+    def _pending_for(self, side: str) -> bool:
+        return any(side in p[2].sides for p in self._pending)
+
     def _side_moving(self, side: str, now: float) -> bool:
         return any(self.is_moving(side, m, now) for m in self.motors)
 
-    def _command(self, side: str, plan: SidePlan, at: float, restart: bool = False):
-        """Bewegungszeiten in Befehlszeiten umrechnen (Anlaufverzögerung dazu)."""
+    def _command(self, side: str, plan: SidePlan, at: float, moved: frozenset[str] = frozenset()):
+        """Bewegungszeiten in Befehlszeiten umrechnen (offenen Leerweg dazu).
+
+        ``moved``: Motoren, die vorher schon gefahren sind – dort ist kein Leerweg mehr offen.
+        """
         motors: dict[str, tuple[int, int]] = {}
         endpoints: dict[str, bool] = {}
         for m, (d, move_ms, ep) in plan.items():
-            delay = self.lag_ms(side, m, d) if restart else self._start_delay_ms(side, m, d, at)
+            delay = 0.0 if m in moved else self._start_delay_ms(side, m, d, at)
             motors[m] = (d, round(move_ms + delay))
             endpoints[m] = ep
         return motors, endpoints
@@ -453,7 +491,7 @@ class BedController:
         return out
 
     def _start_offsets(self, plans: dict[str, SidePlan], now: float) -> dict[str, float]:
-        """Seite mit kürzerem Anlauf später starten, damit beide gleichzeitig losfahren."""
+        """Seite mit weniger offenem Leerweg später starten, damit beide gleichzeitig anheben."""
         pa, pb = plans[SIDE_A], plans[SIDE_B]
         shared = [m for m in self.motors if m in pa and m in pb and pa[m][0] == pb[m][0]]
         if not shared:
@@ -462,13 +500,13 @@ class BedController:
         direction = pa[primary][0]
         if any(self.is_moving(s, primary, now) for s in (SIDE_A, SIDE_B)):
             return {}  # läuft schon – nichts mehr zu versetzen
-        lags = {s: self.lag_ms(s, primary, direction) for s in (SIDE_A, SIDE_B)}
-        latest = max(lags.values())
-        return {s: (latest - lag) / 1000 for s, lag in lags.items()}
+        delays = {s: self._start_delay_ms(s, primary, direction, now) for s in (SIDE_A, SIDE_B)}
+        latest = max(delays.values())
+        return {s: (latest - delay) / 1000 for s, delay in delays.items()}
 
     def _build_sequential(self, plans: dict[str, SidePlan], now: float) -> list[Step]:
         """Für Boxen, die A und B nicht gleichzeitig bedienen: gemeinsamer Teil per CBU 0,
-        danach holt jede Seite einzeln auf (mit erneutem Anlauf)."""
+        danach holt jede Seite einzeln auf."""
         pa, pb = plans[SIDE_A], plans[SIDE_B]
         common: dict[str, tuple[int, int]] = {}
         moved: dict[str, dict[str, float]] = {SIDE_A: {}, SIDE_B: {}}
@@ -495,11 +533,11 @@ class BedController:
                 left = ms - moved[side].get(m, 0.0)
                 if left >= MIN_MOVE_MS:
                     rest[side][m] = (d, left, ep)
-        # Reine Stopps zuerst, dann die Nachläufe nacheinander. Nach dem ersten Befehl
-        # muss jede Seite neu anlaufen (der vorige Befehl hat sie unterbrochen).
+        # Reine Stopps zuerst, dann die Nachläufe nacheinander. Gemeinsam gefahrene Motoren
+        # haben danach keinen Leerweg mehr offen.
         for side in sorted((SIDE_A, SIDE_B), key=lambda s: bool(rest[s])):
             if rest[side]:
-                motors, eps = self._command(side, rest[side], now + t, restart=bool(steps))
+                motors, eps = self._command(side, rest[side], now + t, moved=frozenset(common))
                 steps.append(Step(t, CBU_FOR_SIDE[side], (side,), motors, eps))
                 t += max(ms for _, ms in motors.values()) / 1000 + SEQ_GAP_S
             elif not common and self._side_moving(side, now):
@@ -510,9 +548,11 @@ class BedController:
 
     # ------------------------------------------------------------------ Ablaufsteuerung
 
-    def _schedule(self, steps: list[Step]) -> None:
+    def _schedule(self, steps: list[Step], sides: list[str] | tuple[str, ...] = ()) -> None:
+        """Befehle einplanen. Noch wartende Befehle für dieselben Seiten (und ``sides``)
+        verfallen – sonst würde z. B. ein verzögerter Start nach dem Loslassen noch losfahren."""
         now = self._clock()
-        touched = {s for step in steps for s in step.sides}
+        touched = {s for step in steps for s in step.sides} | set(sides)
         self._pending = [p for p in self._pending if not touched.intersection(p[2].sides)]
         for step in steps:
             self._seq += 1
@@ -652,8 +692,8 @@ class BedController:
             if side in self.sides
         }
         steps = self._build_steps(plans, now)
-        if steps:
-            self._schedule(steps)
+        if steps or any(self._pending_for(s) for s in plans):
+            self._schedule(steps, tuple(plans))
         if self._limit_hit is not limit_before:
             self._notify()  # Hinweis auch dann zeigen, wenn gar nicht gefahren wird
 
@@ -680,7 +720,7 @@ class BedController:
             plan = self._plan_side(s, {}, now)
             plan.pop(motor, None)
             plans[s] = plan
-        self._schedule(self._build_steps(plans, now))
+        self._schedule(self._build_steps(plans, now), tuple(sides))
 
     async def nudge(self, side: str, motor: str, direction: int, ms: int) -> None:
         """Eine Seite für eine feste Befehlszeit fahren (Dienst "move")."""
@@ -727,7 +767,7 @@ class BedController:
             plans[s] = {}
             for m in self.motors:
                 t = self.travel_ms(s, m, DOWN)
-                plans[s][m] = (DOWN, t + overrun_ms(t), True)
+                plans[s][m] = (DOWN, t + overrun_ms(t) + self.gap_ms(s, m), True)
         self._schedule(self._build_steps(plans, now))
 
     def find_favorite(self, key: str) -> str | None:
@@ -828,13 +868,18 @@ class BedController:
         return None
 
     def set_calibration(self, side: str, motor: str, key: str, ms: float) -> None:
-        """Einen Kalibrierwert setzen (``up``, ``down``, ``lag_up``, ``lag_down``)."""
+        """Einen Kalibrierwert setzen (``up``, ``down`` = Laufzeit, ``gap`` = Leerweg unten)."""
         # Bisherige Strecke mit den alten Werten verbuchen, damit die Position nicht springt.
         self._reanchor(side, motor, self._clock())
         if key in ("up", "down"):
             self.calibration[side][motor][key] = _clamp_travel(ms)
+        elif key == "gap":
+            st = self.state[side][motor]
+            if st.at_end == DOWN and not st.direction:
+                st.slack = _clamp_gap(ms)  # steht unten: Motor ist ganz zurückgefahren
+            self.calibration[side][motor][key] = _clamp_gap(ms)
         else:
-            self.calibration[side][motor][key] = _clamp_lag(ms)
+            raise ValueError(f"unbekannter Kalibrierwert {key}")
         self._save()
         self._notify()
 
@@ -845,6 +890,7 @@ class BedController:
         st.pos = min(1.0, max(0.0, pos))
         # "Steht ganz unten/oben" vom Benutzer: dann muss dort nichts mehr angefahren werden.
         st.at_end = (DOWN if st.pos <= 0.0 else UP if st.pos >= 1.0 else 0) if known and not st.direction else 0
+        st.slack = self.gap_ms(side, motor) if st.at_end == DOWN else 0.0
         if st.direction:
             st.start = now
             st.move_start = max(st.move_start, now)
@@ -884,8 +930,9 @@ class BedController:
             st = self.state[s][motor]
             p = self.position(s, motor, now)
             dist = (1.0 - p if direction == UP else p) if st.known else 1.0
-            # Zuschläge decken eine noch ungenaue Laufzeit und einen unbekannten Anlauf ab.
-            plans[s] = {motor: (direction, dist * t * 1.1 + overrun_ms(t) + RELEVEL_EXTRA_MS, True)}
+            # Zuschläge decken eine noch ungenaue Laufzeit ab; unten zusätzlich den Leerweg öffnen.
+            gap = self.gap_ms(s, motor) if direction == DOWN else 0.0
+            plans[s] = {motor: (direction, dist * t * 1.1 + overrun_ms(t) + RELEVEL_EXTRA_MS + gap, True)}
         self._schedule(self._build_steps(plans, now))
         self._skip_event = asyncio.Event()
         self._notify()
@@ -905,6 +952,7 @@ class BedController:
                 st.pos = 1.0 if direction == UP else 0.0
                 st.known = True
                 st.at_end = direction
+                st.slack = self.gap_ms(s, motor) if direction == DOWN else 0.0
             self._notify()
 
     def relevel_skip(self) -> bool:
@@ -921,8 +969,8 @@ class BedController:
             raise ValueError("Nachjustieren ist nur bei zwei Seiten nötig")
         if self.level_ref.get(motor) is None and not self._level_at_end(motor):
             raise ValueError(
-                "Dafür müssen beide Seiten vorher gleich hoch gestanden haben: erst „Alles flach“ "
-                "(für runter: ganz hoch), dann mit „Beide“ ein Stück fahren und nachjustieren."
+                "Dafür müssen beide Seiten vorher gleich hoch gestanden haben: erst „Alles flach“, "
+                "dann mit „Beide“ ein Stück hochfahren und nachjustieren."
             )
         if not any(self.state[s][motor].trail for s in self.sides):
             raise ValueError("Erst mit „Beide“ ein Stück fahren, dann nachjustieren.")
@@ -939,45 +987,53 @@ class BedController:
         motor = adj["motor"]
         await self.wait_motion()
         try:
-            result = self._solve_lag(motor)
+            result = self._solve_gap(motor)
         finally:
             self._save()
             self._notify()
         return result
 
-    def _trail_moved(self, side: str, motor: str, direction: int, lag: float | None, now: float) -> float:
-        """Gefahrener Weg (Anteil) einer Seite seit der Bezugslage, mit ``lag`` für ``direction``."""
-        total = 0.0
+    def _simulate_trail(self, side: str, motor: str, gap: float, ref: float, now: float) -> float:
+        """Lage einer Seite nach allen Fahrten seit der Bezugslage – mit Leerweg ``gap``."""
+        pos = ref
+        slack = gap if ref <= 0.0 else 0.0  # in der flachen Lage ist der Leerweg ganz offen
         for d, start, end in self.state[side][motor].trail:
-            d = int(d)
-            used = lag if (lag is not None and d == direction) else self.lag_ms(side, motor, d)
-            moved = max(0.0, min(end, now) - (start + used / 1000))
-            total += d * moved * 1000 / self.travel_ms(side, motor, d)
-        return total
+            t = max(0.0, min(end, now) - start) * 1000
+            if int(d) == UP:
+                used = min(slack, t)
+                slack -= used
+                pos = min(1.0, pos + (t - used) / self.travel_ms(side, motor, UP))
+            else:
+                pos -= t / self.travel_ms(side, motor, DOWN)
+                if pos < 0.0:
+                    slack = min(gap, slack + (-pos) * self.travel_ms(side, motor, DOWN))
+                    pos = 0.0
+        return pos
 
-    def _solve_lag(self, motor: str) -> dict[str, Any]:
-        """Anlauf so bestimmen, dass beide Seiten seit der Bezugslage gleich weit gefahren sind."""
+    def _solve_gap(self, motor: str) -> dict[str, Any]:
+        """Leerweg so bestimmen, dass beide Seiten seit der Bezugslage gleich hoch stehen."""
         now = self._clock()
         ref = self.level_ref.get(motor)
         if ref is None:
-            end = self._level_at_end(motor)
-            ref = 1.0 if end == UP else 0.0
+            ref = 1.0 if self._level_at_end(motor) == UP else 0.0
         segments = [(seg, s) for s in self.sides for seg in self.state[s][motor].trail]
         if not segments:
             raise ValueError("Keine Fahrt seit der Bezugslage gefunden")
-        last_seg, corrected = max(segments, key=lambda x: x[0][1])
-        direction = int(last_seg[0])
-        key = _lkey(direction)
+        corrected = max(segments, key=lambda x: x[0][1])[1]  # zuletzt allein nachgefahren
         result: dict[str, Any] | None = None
+        relevant = False
         for side in (corrected, *[s for s in self.sides if s != corrected]):
             other = next(s for s in self.sides if s != side)
-            target = self._trail_moved(other, motor, direction, None, now)
+            target = self._simulate_trail(other, motor, self.gap_ms(other, motor), ref, now)
 
-            def diff(lag: float) -> float:
-                return self._trail_moved(side, motor, direction, lag, now) - target
+            def diff(gap: float) -> float:
+                return self._simulate_trail(side, motor, gap, ref, now) - target
 
-            lo, hi = 0.0, float(MAX_LAG_MS)
-            if diff(lo) * diff(hi) > 0:
+            lo, hi = 0.0, float(MAX_GAP_MS)
+            d_lo, d_hi = diff(lo), diff(hi)
+            if abs(d_lo - d_hi) > 1e-6:
+                relevant = True
+            if d_lo * d_hi > 0 or d_lo == d_hi:
                 continue  # mit dieser Seite nicht lösbar, andere probieren
             for _ in range(40):
                 mid = (lo + hi) / 2
@@ -985,22 +1041,26 @@ class BedController:
                     hi = mid
                 else:
                     lo = mid
-            self.calibration[side][motor][key] = _clamp_lag((lo + hi) / 2)
-            result = {"motor": motor, "direction": direction, "side": side}
+            self.calibration[side][motor]["gap"] = _clamp_gap((lo + hi) / 2)
+            result = {"motor": motor, "side": side}
             break
         if result is None:
-            raise ValueError(
-                "Daraus lässt sich kein Versatz bestimmen. Bitte von „Alles flach“ aus neu anfangen."
-            )
+            if not relevant:
+                raise ValueError(
+                    "Der Leerweg zeigt sich nur beim Hochfahren aus der flachen Lage. Bitte erst "
+                    "„Alles flach“, dann mit „Beide“ hochfahren und nachjustieren."
+                )
+            raise ValueError("Daraus lässt sich kein Versatz bestimmen. Bitte von „Alles flach“ aus neu anfangen.")
         # Beide stehen jetzt gleich hoch: das ist die neue Bezugslage.
         level = sum(
-            min(1.0, max(0.0, ref + self._trail_moved(s, motor, direction, None, now))) for s in self.sides
+            self._simulate_trail(s, motor, self.gap_ms(s, motor), ref, now) for s in self.sides
         ) / len(self.sides)
         for s in self.sides:
             st = self.state[s][motor]
             st.pos, st.known, st.direction, st.at_end = level, True, 0, 0
+            st.slack = self.gap_ms(s, motor) if level <= 0.0 else 0.0
         self._set_level_ref(motor, level)
-        result["lags"] = {s: self.lag_ms(s, motor, direction) for s in self.sides}
+        result["gaps"] = {s: self.gap_ms(s, motor) for s in self.sides}
         return result
 
     # --- Prüfen und feinjustieren
@@ -1017,42 +1077,28 @@ class BedController:
                 return "Das Bett steht schon ganz unten – erst ein Stück hochfahren."
         return None
 
-    async def calib_test_move(self, motor: str, direction: int, ms: int = TEST_MOVE_MS) -> None:
-        """Kurze Fahrt beider Seiten mit Ausgleich – zum Beobachten, ob sie gleichzeitig loslaufen."""
+    async def calib_test_move(self, motor: str, ms: int = TEST_MOVE_MS) -> None:
+        """Aus der flachen Lage kurz hochfahren – zum Beobachten, ob beide gleichzeitig anheben."""
         self._cancel_calibration()
         now = self._clock()
         self._settle_finished(now)
-        reason = self._blocked(motor, direction)
-        if reason:
-            raise ValueError(reason)
+        if self._level_at_end(motor, now) != DOWN:
+            raise ValueError("Die Testfahrt startet aus der flachen Lage – bitte erst „Alles flach“.")
         targets = {
-            s: {
-                motor: min(
-                    1.0, max(0.0, self.position(s, motor, now) + direction * ms / self.travel_ms(s, motor, direction))
-                )
-            }
-            for s in self.sides
+            s: {motor: min(1.0, ms / self.travel_ms(s, motor, UP))} for s in self.sides
         }
         await self.move_to(targets)
 
-    def shift_lag(self, motor: str, direction: int, delta_ms: float) -> None:
-        """Versatz nachjustieren: positiv = Seite A startet später (B bekommt mehr Vorlauf)."""
-        self._shift_lag(motor, direction, delta_ms)
+    def shift_gap(self, motor: str, delta_ms: float) -> None:
+        """Feinjustieren: positiv = Seite B bekommt mehr Leerweg (A startet später)."""
+        if SIDE_B in self.sides:
+            ga, gb = self.gap_ms(SIDE_A, motor), self.gap_ms(SIDE_B, motor)
+            base = min(ga, gb)
+            diff = gb - ga + delta_ms
+            for side, value in ((SIDE_A, base + max(0.0, -diff)), (SIDE_B, base + max(0.0, diff))):
+                self.set_calibration(side, motor, "gap", value)
         self._save()
         self._notify()
-
-    def _shift_lag(self, motor: str, direction: int, delta: float) -> None:
-        """Differenz lag_b - lag_a um ``delta`` verschieben; die kleinere bleibt die Basis."""
-        if SIDE_B not in self.sides:
-            return
-        key = _lkey(direction)
-        la = self.calibration[SIDE_A][motor][key]
-        lb = self.calibration[SIDE_B][motor][key]
-        base = min(la, lb)
-        diff = lb - la + delta
-        new = {SIDE_A: base + max(0.0, -diff), SIDE_B: base + max(0.0, diff)}
-        for side, value in new.items():
-            self.calibration[side][motor][key] = _clamp_lag(value)
 
     # --- Vollhub-Laufzeit messen
 
@@ -1112,7 +1158,8 @@ class BedController:
         result = {}
         if apply:
             for side, elapsed in marks.items():
-                travel = elapsed - self.lag_ms(side, motor, direction)
+                # Hochfahren aus der flachen Lage: erst läuft der Leerweg, dann hebt der Rost an.
+                travel = elapsed - (self.gap_ms(side, motor) if direction == UP else 0.0)
                 self.calibration[side][motor][_dkey(direction)] = _clamp_travel(travel)
                 result[side] = self.calibration[side][motor][_dkey(direction)]
         for side in marks:
@@ -1185,8 +1232,8 @@ def _clamp_travel(ms: float) -> float:
     return float(min(MAX_TRAVEL_MS, max(MIN_TRAVEL_MS, round(float(ms)))))
 
 
-def _clamp_lag(ms: float) -> float:
-    return float(min(MAX_LAG_MS, max(0, round(float(ms)))))
+def _clamp_gap(ms: float) -> float:
+    return float(min(MAX_GAP_MS, max(0, round(float(ms)))))
 
 
 def _split_long(step: Step) -> list[Step]:

@@ -1,8 +1,11 @@
 """Simulierte Auping-Connect-Box mit physikalischen Motoren.
 
 Wird von den Tests direkt benutzt und von ``mock_box.py`` als HTTP-Server
-angeboten. Die "wahren" Laufzeiten der Motoren sind absichtlich je Seite
-verschieden – genau das Problem, das die Kalibrierung lösen soll.
+angeboten. Modell wie beim echten Bett: Der Motor schiebt den Lattenrost nur.
+In der flachen Lage fährt er weiter zurück als der aufliegende Rost – beim
+Hochfahren läuft er diesen Leerweg (``gap``) erst leer, bevor er anhebt. Aus einer
+Zwischenlage und beim Runterfahren gibt es keinen Leerweg. Der Leerweg ist je
+Seite verschieden – genau das Problem, das die Kalibrierung lösen soll.
 """
 
 from __future__ import annotations
@@ -16,9 +19,10 @@ SIDES_FOR_CBU = {0: ("a", "b"), 1: ("a",), 2: ("b",)}
 
 @dataclass
 class SimMotor:
-    pos: float = 0.0
+    pos: float = 0.0  # Lage des Rosts 0..1
+    slack: float = 0.0  # offener Leerweg in ms (nur unten)
     direction: int = 0  # +1 hoch, -1 runter
-    move_start: float = 0.0  # Befehl + Anlaufverzögerung
+    cmd_start: float = 0.0
     end: float = 0.0
 
 
@@ -28,41 +32,57 @@ class SimBox:
         travel: dict[str, dict[str, dict[str, float]]],
         parallel: bool = True,
         clock=time.monotonic,
-        lag: dict[str, dict[str, dict[str, float]]] | None = None,
+        gap: dict[str, dict[str, float]] | None = None,
     ) -> None:
         """``travel[side][motor]["up"|"down"]`` = echte Vollhub-Zeit in ms,
-        ``lag`` = echte Anlaufverzögerung (Totweg) in ms."""
+        ``gap[side][motor]`` = echter Leerweg unten in ms."""
         self.travel = travel
-        self.lag = lag or {}
+        self.gap = gap or {}
         self.parallel = parallel
         self.clock = clock
-        self.motors = {s: {m: SimMotor() for m in travel[s]} for s in travel}
+        self.motors = {
+            s: {m: SimMotor(slack=self._gap(s, m)) for m in travel[s]} for s in travel
+        }
         self.log: list[tuple[float, int, dict]] = []
 
-    def _pos(self, side: str, motor: str, now: float) -> float:
+    def _gap(self, side: str, motor: str) -> float:
+        return float(self.gap.get(side, {}).get(motor, 0))
+
+    def _state_at(self, side: str, motor: str, now: float) -> tuple[float, float]:
         mo = self.motors[side][motor]
         if not mo.direction:
-            return mo.pos
-        t = self.travel[side][motor]["up" if mo.direction > 0 else "down"]
-        elapsed = max(0.0, min(now, mo.end) - mo.move_start)
-        return min(1.0, max(0.0, mo.pos + mo.direction * elapsed * 1000 / t))
+            return mo.pos, mo.slack
+        t = max(0.0, min(now, mo.end) - mo.cmd_start) * 1000
+        if mo.direction > 0:
+            used = min(mo.slack, t)
+            return min(1.0, mo.pos + (t - used) / self.travel[side][motor]["up"]), mo.slack - used
+        pos = mo.pos - t / self.travel[side][motor]["down"]
+        if pos < 0:
+            return 0.0, min(self._gap(side, motor), mo.slack + (-pos) * self.travel[side][motor]["down"])
+        return pos, mo.slack
 
     def position(self, side: str, motor: str) -> float:
-        return self._pos(side, motor, self.clock())
+        return self._state_at(side, motor, self.clock())[0]
+
+    def set_position(self, side: str, motor: str, pos: float) -> None:
+        mo = self.motors[side][motor]
+        mo.pos, mo.direction = pos, 0
+        mo.slack = self._gap(side, motor) if pos <= 0 else 0.0
 
     def moving(self, side: str, motor: str) -> bool:
+        """Läuft der Motor noch sichtbar oder im Leerweg?"""
         mo = self.motors[side][motor]
         now = self.clock()
         if not mo.direction or now >= mo.end:
             return False
-        if now < mo.move_start:
-            return True
-        p = self._pos(side, motor, now)
-        return not ((mo.direction > 0 and p >= 1.0) or (mo.direction < 0 and p <= 0.0))
+        pos, slack = self._state_at(side, motor, now)
+        if mo.direction > 0:
+            return pos < 1.0
+        return pos > 0.0 or slack < self._gap(side, motor)
 
     def _stop_motor(self, side: str, motor: str, now: float) -> None:
         mo = self.motors[side][motor]
-        mo.pos = self._pos(side, motor, now)
+        mo.pos, mo.slack = self._state_at(side, motor, now)
         mo.direction = 0
 
     def _stop_side(self, side: str, now: float) -> None:
@@ -91,13 +111,11 @@ class SimBox:
                 if action in (1, 2) and ms > 0:
                     direction = 1 if action == 1 else -1
                     if mo.direction == direction and now < mo.end:
-                        mo.end = now + ms / 1000  # läuft weiter, kein neuer Anlauf
+                        mo.end = now + ms / 1000  # läuft einfach weiter
                         continue
                     self._stop_motor(side, motor, now)
-                    key = "up" if direction > 0 else "down"
-                    lag = self.lag.get(side, {}).get(motor, {}).get(key, 0)
                     mo.direction = direction
-                    mo.move_start = now + lag / 1000
+                    mo.cmd_start = now
                     mo.end = now + ms / 1000
                 else:
                     self._stop_motor(side, motor, now)

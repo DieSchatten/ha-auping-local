@@ -409,35 +409,32 @@ class AupingPanel extends HTMLElement {
     const busy = !!d.measure;
     const offsetCard = two
       ? `<section class="card">
-        <h2>1 · Startversatz einstellen</h2>
+        <h2>1 · Leerweg ausgleichen</h2>
+        <p class="small">In der flachen Lage läuft ein Motor beim Hochfahren erst ein Stück leer, bevor er den Rost
+          anhebt – bei dir ist dieser Leerweg auf einer Seite länger. So gleichst du ihn aus:</p>
         <ol class="steps">
-          <li><b>Alles flach</b> fahren – dann stehen beide Seiten gleich hoch.<br>
-            <span class="small">Für die Richtung „runter“: stattdessen beide ganz hoch fahren.</span></li>
-          <li>Mit <b>„Beide“</b> ein Stück hochfahren (bzw. runter).</li>
+          <li><b>Alles flach</b> fahren.</li>
+          <li>Mit <b>„Beide“</b> ein Stück hochfahren.</li>
           <li>Beim Motor auf <b>„Nachjustieren“</b> tippen, die zurückliegende Seite nachfahren, bis beide gleich hoch
             sind, <b>„Passt jetzt“</b>.</li>
         </ol>
-        <p class="small">Das kannst du jederzeit wiederholen, z. B. wenn dir im Alltag ein Unterschied auffällt –
-          ausgehend von einer Lage, in der beide gleich hoch stehen.</p>
+        <p class="small">Das gilt nur fürs Hochfahren aus der flachen Lage – aus einer Zwischenlage und beim
+          Runterfahren gibt es keinen Leerweg. Jederzeit wiederholbar.</p>
         <div class="row"><button class="btn primary" data-goremote>Zur Fernbedienung</button></div>
       </section>
       <section class="card">
         <h2>Prüfen und feinjustieren</h2>
         <div class="chips">${chips}</div>
-        ${[1, -1]
-          .map(
-            (dir) => `<div class="lag-block">
-            <div class="lag-head"><b>${dir > 0 ? "Hoch" : "Runter"}:</b> <span data-lagtext="${dir}"></span></div>
-            <div class="row">
-              <button class="btn" data-testmove="${dir}">Testfahrt ${dir > 0 ? "hoch" : "runter"}</button>
-              <button class="btn" data-shift="${dir}:100">${esc(d.names.a)} fuhr zuerst los</button>
-              <button class="btn" data-shift="${dir}:-100">${esc(d.names.b)} fuhr zuerst los</button>
-            </div>
-          </div>`
-          )
-          .join("")}
-        <p class="small">Bei der Testfahrt sollen beide Seiten gleichzeitig losfahren. Fährt eine zuerst los, den passenden
-          Knopf drücken (je 0,1 s) und erneut testen.</p>
+        <div class="lag-block">
+          <div class="lag-head"><b>Leerweg:</b> <span data-gaptext></span></div>
+          <div class="row">
+            <button class="btn" data-testmove>Testfahrt aus flach</button>
+            <button class="btn" data-shift="100">${esc(d.names.a)} hob zuerst an</button>
+            <button class="btn" data-shift="-100">${esc(d.names.b)} hob zuerst an</button>
+          </div>
+        </div>
+        <p class="small">Die Testfahrt fährt aus der flachen Lage 3 s hoch – beide Seiten sollen gleichzeitig anheben.
+          Hebt eine zuerst an, den passenden Knopf drücken (je 0,1 s), „Alles flach“ und erneut testen.</p>
       </section>`
       : "";
     return `
@@ -459,8 +456,7 @@ class AupingPanel extends HTMLElement {
         <table class="values">
           <thead><tr><th></th>${d.sides.map((s) => `<th>${esc(d.names[s])}</th>`).join("")}</tr></thead>
           <tbody>${[
-            ["lag_up", "Anlauf hoch"],
-            ["lag_down", "Anlauf runter"],
+            ["gap", "Leerweg unten"],
             ["up", "Laufzeit hoch"],
             ["down", "Laufzeit runter"],
           ]
@@ -475,7 +471,7 @@ class AupingPanel extends HTMLElement {
             )
             .join("")}</tbody>
         </table>
-        <p class="small">Für den Gleichlauf zählt beim Anlauf nur die Differenz zwischen den Seiten.</p>
+        <p class="small">Für den Gleichlauf zählt beim Leerweg nur der Unterschied zwischen den Seiten.</p>
       </section>`;
   }
 
@@ -685,10 +681,7 @@ class AupingPanel extends HTMLElement {
     root.querySelectorAll("[data-adjustok]").forEach((b) =>
       b.addEventListener("click", async () => {
         const res = await this._cmd("adjust_finish", { apply: true });
-        if (res && res.lags) {
-          const dir = res.direction > 0 ? "hoch" : "runter";
-          this._showToast(`Gespeichert (${dir}): ${this._lagText(res.lags)}`);
-        }
+        if (res && res.gaps) this._showToast(`Gespeichert: ${this._gapText(res.gaps)}`);
       })
     );
     root.querySelectorAll("[data-adjustcancel]").forEach((b) =>
@@ -703,15 +696,12 @@ class AupingPanel extends HTMLElement {
       })
     );
     root.querySelectorAll("[data-testmove]").forEach((b) =>
-      b.addEventListener("click", () =>
-        this._cmd("test_move", { motor: this._calibMotor, direction: Number(b.dataset.testmove) > 0 ? "up" : "down" })
-      )
+      b.addEventListener("click", () => this._cmd("test_move", { motor: this._calibMotor }))
     );
     root.querySelectorAll("[data-shift]").forEach((b) =>
-      b.addEventListener("click", () => {
-        const [dir, delta] = b.dataset.shift.split(":").map(Number);
-        this._cmd("shift_lag", { motor: this._calibMotor, direction: dir > 0 ? "up" : "down", delta });
-      })
+      b.addEventListener("click", () =>
+        this._cmd("shift_gap", { motor: this._calibMotor, delta: Number(b.dataset.shift) })
+      )
     );
     root.querySelectorAll("[data-skip]").forEach((b) => b.addEventListener("click", () => this._cmd("relevel_skip")));
     root.querySelectorAll("[data-savenames]").forEach((b) =>
@@ -796,12 +786,12 @@ class AupingPanel extends HTMLElement {
     });
   }
 
-  _lagText(lags) {
+  _gapText(gaps) {
     const d = this._data;
-    const diff = (lags.b ?? 0) - (lags.a ?? 0);
-    if (Math.abs(diff) < 50) return "beide starten gleichzeitig";
+    const diff = (gaps.b ?? 0) - (gaps.a ?? 0);
+    if (Math.abs(diff) < 50) return "auf beiden Seiten gleich";
     const later = diff > 0 ? d.names.b : d.names.a;
-    return `${later} startet ${sec(Math.abs(diff))} s später`;
+    return `${later} läuft ${sec(Math.abs(diff))} s länger leer`;
   }
 
   _commandsHtml(commands) {
@@ -900,10 +890,9 @@ class AupingPanel extends HTMLElement {
       const [s, m, k] = inp.dataset.cal.split(":");
       inp.value = ((d.calibration[s][m][k] ?? 0) / 1000).toFixed(2);
     });
-    root.querySelectorAll("[data-lagtext]").forEach((el) => {
-      const key = Number(el.dataset.lagtext) > 0 ? "lag_up" : "lag_down";
-      const lags = Object.fromEntries(d.sides.map((s) => [s, d.calibration[s][this._calibMotor][key]]));
-      el.textContent = this._lagText(lags);
+    root.querySelectorAll("[data-gaptext]").forEach((el) => {
+      const gaps = Object.fromEntries(d.sides.map((s) => [s, d.calibration[s][this._calibMotor].gap]));
+      el.textContent = this._gapText(gaps);
     });
     root.querySelectorAll("[data-remaining]").forEach((el) => {
       el.textContent = d.motion_remaining ? `(noch etwa ${Math.ceil(d.motion_remaining)} s)` : "";

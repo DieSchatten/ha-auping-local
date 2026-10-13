@@ -23,10 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from auping_sim import SimBox  # noqa: E402
 
 SPEED = {"head": {"up": 8000, "down": 7000}, "back": {"up": 9000, "down": 8000}, "legs": {"up": 7000, "down": 6500}}
-LAG = {
-    "a": {m: {"up": 200, "down": 300} for m in SPEED},
-    "b": {m: {"up": 800, "down": 600} for m in SPEED},
-}
+# Leerweg unten (ms): Seite B läuft beim Hochfahren aus der flachen Lage länger leer
+GAP = {"a": {m: 300 for m in SPEED}, "b": {m: 1000 for m in SPEED}}
 
 PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Box-Simulation</title>
@@ -45,7 +43,7 @@ setInterval(t,150);t()</script>"""
 
 
 def build_app(key: str, parallel: bool) -> web.Application:
-    sim = SimBox({"a": json.loads(json.dumps(SPEED)), "b": json.loads(json.dumps(SPEED))}, parallel=parallel, lag=LAG)
+    sim = SimBox({"a": json.loads(json.dumps(SPEED)), "b": json.loads(json.dumps(SPEED))}, parallel=parallel, gap=GAP)
     app = web.Application()
 
     def check(request: web.Request) -> None:
