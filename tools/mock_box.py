@@ -43,7 +43,7 @@ setInterval(t,150);t()</script>"""
 
 
 def build_app(key: str, parallel: bool) -> web.Application:
-    sim = SimBox({"a": json.loads(json.dumps(SPEED)), "b": json.loads(json.dumps(SPEED))}, parallel=parallel, gap=GAP)
+    sim = SimBox({"a": json.loads(json.dumps(SPEED)), "b": json.loads(json.dumps(SPEED))}, parallel=parallel, gap=GAP, strict_reversal=True)
     app = web.Application()
 
     def check(request: web.Request) -> None:

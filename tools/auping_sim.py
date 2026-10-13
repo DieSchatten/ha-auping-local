@@ -33,11 +33,15 @@ class SimBox:
         parallel: bool = True,
         clock=time.monotonic,
         gap: dict[str, dict[str, float]] | None = None,
+        strict_reversal: bool = False,
     ) -> None:
         """``travel[side][motor]["up"|"down"]`` = echte Vollhub-Zeit in ms,
-        ``gap[side][motor]`` = echter Leerweg unten in ms."""
+        ``gap[side][motor]`` = echter Leerweg unten in ms,
+        ``strict_reversal``: Steuereinheit ignoriert eine direkte Richtungsumkehr ohne Stopp
+        (der laufende Befehl läuft dann einfach weiter) – so verhält sich das echte Bett."""
         self.travel = travel
         self.gap = gap or {}
+        self.strict_reversal = strict_reversal
         self.parallel = parallel
         self.clock = clock
         self.motors = {
@@ -113,6 +117,8 @@ class SimBox:
                     if mo.direction == direction and now < mo.end:
                         mo.end = now + ms / 1000  # läuft einfach weiter
                         continue
+                    if self.strict_reversal and mo.direction == -direction and now < mo.end:
+                        continue  # direkte Umkehr wird ignoriert
                     self._stop_motor(side, motor, now)
                     mo.direction = direction
                     mo.cmd_start = now

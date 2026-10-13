@@ -60,6 +60,7 @@ MEASURE_COMMAND_MS = 60000  # Messfahrt: lang genug für jeden Motor, Endschalte
 TRAIL_MAX = 200  # gemerkte Fahrten seit der letzten "gleich hoch"-Lage je Seite und Motor
 TEST_MOVE_MS = 3000  # Testfahrt zum Prüfen des Versatzes
 RELEVEL_EXTRA_MS = 1500
+REVERSE_PAUSE_S = 0.5  # vor einer Richtungsumkehr: erst Stopp, dann so lange warten
 
 
 class MotorApi(Protocol):
@@ -453,6 +454,22 @@ class BedController:
                     plan[motor] = (st.direction, max(0.0, remaining), st.endpoint)
         return plan
 
+    def _reversal_stop(self, plans: dict[str, SidePlan], now: float) -> list[Step]:
+        """Soll ein laufender Motor die Richtung wechseln? Dann erst anhalten (Stopp-Befehl),
+        kurz warten und danach neu losfahren – wie die Original-App. Die Steuereinheiten nehmen
+        eine direkte Umkehr nicht zuverlässig an. Gibt den Stopp-Schritt zurück (oder [])."""
+        reversing = any(
+            self.is_moving(s, m, now) == -d for s, plan in plans.items() for m, (d, _, _) in plan.items()
+        )
+        if not reversing:
+            return []
+        involved = tuple(s for s in self.sides if s in plans)
+        for s in involved:
+            for m in self.motors:
+                self._settle(s, m, now)  # gilt ab jetzt als angehalten
+        cbu = CBU_BOTH if len(involved) == 2 else CBU_FOR_SIDE[involved[0]]
+        return [Step(0.0, cbu, involved, {})]
+
     def _pending_for(self, side: str) -> bool:
         return any(side in p[2].sides for p in self._pending)
 
@@ -691,7 +708,18 @@ class BedController:
             for side, motor_targets in targets.items()
             if side in self.sides
         }
+        stop_first = self._reversal_stop(plans, now)
+        if stop_first:
+            plans = {
+                side: self._plan_side(side, motor_targets, now, hold=hold)
+                for side, motor_targets in targets.items()
+                if side in self.sides
+            }
         steps = self._build_steps(plans, now)
+        if stop_first:
+            for step in steps:
+                step.at += REVERSE_PAUSE_S
+            steps = stop_first + steps
         if steps or any(self._pending_for(s) for s in plans):
             self._schedule(steps, tuple(plans))
         if self._limit_hit is not limit_before:
@@ -710,9 +738,17 @@ class BedController:
         dirs = {self.is_moving(s, motor, now) for s in sides} - {0}
         if len(sides) == 2 and len(dirs) == 1:
             direction = dirs.pop()
-            pos = [self.position(s, motor, now) for s in sides]
-            x = max(pos) if direction == UP else min(pos)
-            await self.move_to({s: {motor: x} for s in sides})
+            pos = {s: self.position(s, motor, now) for s in sides}
+            x = max(pos.values()) if direction == UP else min(pos.values())
+            plans = {}
+            for s in sides:
+                if abs(pos[s] - x) < 1e-4:
+                    plan = self._plan_side(s, {}, now)  # vorne: sofort anhalten
+                    plan.pop(motor, None)
+                else:
+                    plan = self._plan_side(s, {motor: x}, now)  # zurück: aufholen
+                plans[s] = plan
+            self._schedule(self._build_steps(plans, now), tuple(sides))
             return
         # Einzelne Seite: nur diesen Motor anhalten, andere laufende Motoren behalten.
         plans = {}
@@ -737,10 +773,12 @@ class BedController:
                     self._notify()
                     return
                 ms = round(delay + abs(allowed - p) * travel)
+        stop_first = self._reversal_stop({side: {motor: (direction, float(ms), False)}}, now)
         others, eps = self._command(side, self._plan_side(side, {}, now), now)
         others[motor] = (direction, int(ms))
         eps[motor] = False
-        self._schedule(_split_long(Step(0.0, CBU_FOR_SIDE[side], (side,), others, eps)))
+        steps = _split_long(Step(REVERSE_PAUSE_S if stop_first else 0.0, CBU_FOR_SIDE[side], (side,), others, eps))
+        self._schedule(stop_first + steps)
 
     def _stop_now(self) -> None:
         now = self._clock()
@@ -969,8 +1007,9 @@ class BedController:
             raise ValueError("Nachjustieren ist nur bei zwei Seiten nötig")
         if self.level_ref.get(motor) is None and not self._level_at_end(motor):
             raise ValueError(
-                "Dafür müssen beide Seiten vorher gleich hoch gestanden haben: erst „Alles flach“, "
-                "dann mit „Beide“ ein Stück hochfahren und nachjustieren."
+                "Dafür müssen beide Seiten vorher gleich hoch gestanden haben: erst „Alles flach“ "
+                "ganz zu Ende fahren lassen (bis „sichert Endlage“ verschwindet), dann mit „Beide“ "
+                "ein Stück hochfahren und nachjustieren."
             )
         if not any(self.state[s][motor].trail for s in self.sides):
             raise ValueError("Erst mit „Beide“ ein Stück fahren, dann nachjustieren.")

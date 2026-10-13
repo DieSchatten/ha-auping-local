@@ -880,8 +880,12 @@ class AupingPanel extends HTMLElement {
     for (const m of d.motors) {
       const el = root.querySelector(`[data-moving="${m}"]`);
       if (!el) continue;
-      const dirs = new Set(d.sides.map((s) => d.positions[s][m].moving).filter((x) => x));
-      el.textContent = dirs.has(1) ? "fährt hoch" : dirs.has(-1) ? "fährt runter" : "";
+      const moving = d.sides.map((s) => d.positions[s][m]).filter((p) => p.moving);
+      const dirs = new Set(moving.map((p) => p.moving));
+      // Nach dem Erreichen von 0 % bzw. 100 % läuft der Motor kurz nach, damit er ganz zurück-
+      // bzw. hochfährt – das soll man sehen, sonst wirkt es, als hinge etwas.
+      const securing = moving.length && moving.every((p) => (p.moving < 0 && p.pos <= 0) || (p.moving > 0 && p.pos >= 1));
+      el.textContent = securing ? "sichert Endlage …" : dirs.has(1) ? "fährt hoch" : dirs.has(-1) ? "fährt runter" : "";
     }
     const warn = root.querySelector("#unknown");
     if (warn) warn.hidden = !unknown;

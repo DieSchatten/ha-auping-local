@@ -78,8 +78,11 @@ def make(
     calibrate_travel=True,
     calibrate_gap=True,
     start=0.0,
+    strict_reversal=True,
 ):
-    sim = SimBox(copy.deepcopy(travel), parallel=parallel_box, gap=copy.deepcopy(gap))
+    sim = SimBox(
+        copy.deepcopy(travel), parallel=parallel_box, gap=copy.deepcopy(gap), strict_reversal=strict_reversal
+    )
     ctl = BedController(FakeApi(sim), ["a", "b"], MOTORS, mode=mode)
     for s in ("a", "b"):
         for m in MOTORS:
@@ -396,6 +399,40 @@ async def test_endpoint_not_driven_again():
     await ctl.async_shutdown()
 
 
+# --------------------------------------------------------------------------- Endlage & Umkehr
+
+
+async def test_up_right_after_flat_reverses_cleanly():
+    """Alles flach, dann sofort hoch, während der Motor noch nachläuft: erst Stopp, dann hoch –
+    beide Seiten heben gleichzeitig an (echte Steuereinheiten ignorieren eine direkte Umkehr)."""
+    ctl, sim = make(start=0.5)
+    await ctl.flat()
+    await asyncio.sleep(1.05)  # unten angekommen (0,9 s), Nachlauf läuft noch
+    assert ctl.any_moving() and ctl.position("a", "back") == 0.0
+    sent = len(sim.log)
+    await hold(ctl, ["a", "b"], "back", UP, 1.4)
+    await settle(ctl, sim)
+    after = sim.log[sent:]
+    assert after[0][2]["motor_2"]["Action"] == 0, "zuerst ein Stopp"
+    first_up = min(ts for ts, _, b in after if b["motor_2"]["Action"] == 1)
+    assert first_up - after[0][0] >= 0.4, "Pause zwischen Stopp und Umkehr"
+    assert sim.position("a", "back") > 0.15
+    assert abs(diff(sim)) < 0.03
+    await ctl.async_shutdown()
+
+
+async def test_release_at_bottom_stops_leader():
+    """Runter halten bis zum Anschlag und loslassen: die vorne liegende Seite stoppt sofort."""
+    ctl, sim = make(start=0.3)
+    await hold(ctl, ["a", "b"], "back", DOWN, 1.0)  # 0,3 * 1800 ms = 0,54 s bis unten
+    await asyncio.wait_for(ctl.wait_idle(), 5)
+    await asyncio.sleep(0.05)
+    last = sim.log[-2:]
+    assert all(b["motor_2"]["Action"] == 0 for _, _, b in last), "beide sofort gestoppt"
+    await settle(ctl, sim)
+    await ctl.async_shutdown()
+
+
 # --------------------------------------------------------------------------- Matratzenmodus
 
 
@@ -564,16 +601,17 @@ async def test_midway_restart_needs_no_offset():
     await ctl.async_shutdown()
 
 
-async def test_adjust_after_flat_even_during_overrun():
-    """Nach „Alles flach“ sofort hochfahren, obwohl der Nachlauf noch läuft – Bezug muss stimmen."""
+async def test_adjust_after_interrupted_flat_explains():
+    """Nach „Alles flach“ sofort hochgefahren: Nachjustieren erklärt, dass man warten muss."""
     ctl, sim = make(calibrate_gap=False, start=0.5)
     await ctl.flat()
     await asyncio.sleep(1.05)  # unten angekommen (0,9 s), Nachlauf läuft noch bis 1,3 s
     assert ctl.any_moving()
     await hold(ctl, ["a", "b"], "back", UP, 1.4)
     await settle(ctl, sim)
-    ctl.adjust_start("back")  # darf nicht abgelehnt werden
-    await ctl.adjust_finish(apply=False)
+    # Der Motor war noch nicht ganz zurück – dafür gibt es einen verständlichen Hinweis
+    with pytest.raises(ValueError, match="zu Ende"):
+        ctl.adjust_start("back")
     await ctl.async_shutdown()
 
 
