@@ -51,7 +51,6 @@ class AupingPanel extends HTMLElement {
     this._tab = store("tab") || "remote";
     this._side = store("side") || "both";
     this._calibMotor = null;
-    this._size = "big";
     this._data = null;
     this._entries = [];
     this._entryId = null;
@@ -230,18 +229,17 @@ class AupingPanel extends HTMLElement {
   _structureKey() {
     const d = this._data;
     const m = d.measure;
-    const o = d.offset;
     return JSON.stringify([
       this._tab,
       this._side,
       this._calibMotor,
-      this._size,
       d.sides,
       d.motors,
       d.names,
       d.mode,
       m && [m.motor, m.direction, m.phase, Object.keys(m.marks)],
-      o && [o.motor, o.direction, o.phase, o.rounds],
+      d.adjust && d.adjust.motor,
+      d.relevel,
       this._tab === "settings" ? [d.box, d.version, d.host, d.mattress, d.max_diff] : null,
       this._tab === "remote" ? [d.favorites.map((f) => [f.id, f.name]), this._favEdit, d.mattress, d.max_diff] : null,
     ]);
@@ -290,13 +288,14 @@ class AupingPanel extends HTMLElement {
             )
             .join("")}</div>`
         : "";
+    const two = d.sides.length === 2;
     const motors = d.motors
-      .map(
-        (m) => `
+      .map((m) => (d.adjust && d.adjust.motor === m ? this._adjustCard(m) : `
       <section class="card motor">
         <div class="motor-head">
           <h2>${esc(d.motor_names[m])}</h2>
           <span class="moving" data-moving="${m}"></span>
+          ${two && !d.adjust ? `<button class="link small" data-adjust="${m}">Nachjustieren</button>` : ""}
         </div>
         <div class="motor-body">
           <div class="bars">${d.sides
@@ -313,8 +312,7 @@ class AupingPanel extends HTMLElement {
             <button class="holdbtn" data-hold="down" data-motor="${m}" aria-label="${esc(d.motor_names[m])} runter">${ICON.down}</button>
           </div>
         </div>
-      </section>`
-      )
+      </section>`))
       .join("");
     const mattressHint =
       d.sides.length === 2 && d.mattress === "single"
@@ -333,6 +331,31 @@ class AupingPanel extends HTMLElement {
         <button class="btn" data-act="home">Referenzfahrt</button>
       </section>
       ${this._favoritesHtml()}`;
+  }
+
+  /** Nachjustieren: jede Seite einzeln fahren, bis beide gleich hoch sind. */
+  _adjustCard(m) {
+    const d = this._data;
+    const rows = d.sides
+      .map(
+        (s) => `<div class="adjust-row">
+          <span class="adjust-name">${esc(d.names[s])}</span>
+          <div class="bar"><div class="fill" data-fill="${s}:${m}"></div></div>
+          <button class="holdbtn small" data-hold="up" data-holdside="${s}" data-motor="${m}" aria-label="${esc(d.names[s])} hoch">${ICON.up}</button>
+          <button class="holdbtn small" data-hold="down" data-holdside="${s}" data-motor="${m}" aria-label="${esc(d.names[s])} runter">${ICON.down}</button>
+        </div>`
+      )
+      .join("");
+    return `<section class="card motor session">
+        <div class="motor-head"><h2>${esc(d.motor_names[m])} nachjustieren</h2><span class="moving" data-moving="${m}"></span></div>
+        <p class="small">Fahre die Seite, die zurückliegt, mit ihren eigenen Tasten nach, bis beide gleich hoch stehen.
+        Dann „Passt jetzt“ – daraus berechnet die Integration den Startversatz.</p>
+        ${rows}
+        <div class="row">
+          <button class="btn ok" data-adjustok>Passt jetzt</button>
+          <button class="link" data-adjustcancel>Abbrechen</button>
+        </div>
+      </section>`;
   }
 
   _favoritesHtml() {
@@ -379,45 +402,60 @@ class AupingPanel extends HTMLElement {
   _calibHtml() {
     const d = this._data;
     const m = this._calibMotor;
+    const two = d.sides.length === 2;
     const chips = d.motors
       .map((x) => `<button class="chip ${x === m ? "active" : ""}" data-cmotor="${x}">${esc(d.motor_names[x])}</button>`)
       .join("");
-    const two = d.sides.length === 2;
-    let session = "";
-    if (d.offset) session = this._offsetHtml(d.offset);
-    else if (d.measure) session = this._measureHtml(d.measure);
-    const busy = !!(d.offset || d.measure);
-    return `
-      <section class="card">
-        <h2>So funktioniert der Ausgleich</h2>
-        <p>Beide Motoren sind gleich schnell, aber eine Seite kommt später in Bewegung (Totweg). Die Integration startet deshalb die
-        früher anlaufende Seite um genau diesen <b>Startversatz</b> später – beide Lattenroste fahren dann im Gleichschritt.
-        Den Versatz findest du hier ohne Stoppuhr: Testfahrt ab der Endlage, hinschauen, sagen welche Seite höher steht.</p>
-        <div class="chips">${chips}</div>
+    const busy = !!d.measure;
+    const offsetCard = two
+      ? `<section class="card">
+        <h2>1 · Startversatz einstellen</h2>
+        <ol class="steps">
+          <li><b>Alles flach</b> fahren – dann stehen beide Seiten gleich hoch.<br>
+            <span class="small">Für die Richtung „runter“: stattdessen beide ganz hoch fahren.</span></li>
+          <li>Mit <b>„Beide“</b> ein Stück hochfahren (bzw. runter).</li>
+          <li>Beim Motor auf <b>„Nachjustieren“</b> tippen, die zurückliegende Seite nachfahren, bis beide gleich hoch
+            sind, <b>„Passt jetzt“</b>.</li>
+        </ol>
+        <p class="small">Das kannst du jederzeit wiederholen, z. B. wenn dir im Alltag ein Unterschied auffällt –
+          ausgehend von einer Lage, in der beide gleich hoch stehen.</p>
+        <div class="row"><button class="btn primary" data-goremote>Zur Fernbedienung</button></div>
       </section>
-      ${session}
-      ${
-        two
-          ? `<section class="card ${busy ? "disabled" : ""}">
-        <h2>1 · Startversatz abgleichen</h2>
-        <p>Je Richtung etwa 4–8 Runden à 15–30 Sekunden. Erst hoch, dann runter.</p>
-        <div class="row">
-          <button class="btn primary" data-offset="up" ${busy ? "disabled" : ""}>Hoch abgleichen</button>
-          <button class="btn primary" data-offset="down" ${busy ? "disabled" : ""}>Runter abgleichen</button>
-        </div>
+      <section class="card">
+        <h2>Prüfen und feinjustieren</h2>
+        <div class="chips">${chips}</div>
+        ${[1, -1]
+          .map(
+            (dir) => `<div class="lag-block">
+            <div class="lag-head"><b>${dir > 0 ? "Hoch" : "Runter"}:</b> <span data-lagtext="${dir}"></span></div>
+            <div class="row">
+              <button class="btn" data-testmove="${dir}">Testfahrt ${dir > 0 ? "hoch" : "runter"}</button>
+              <button class="btn" data-shift="${dir}:100">${esc(d.names.a)} fuhr zuerst los</button>
+              <button class="btn" data-shift="${dir}:-100">${esc(d.names.b)} fuhr zuerst los</button>
+            </div>
+          </div>`
+          )
+          .join("")}
+        <p class="small">Bei der Testfahrt sollen beide Seiten gleichzeitig losfahren. Fährt eine zuerst los, den passenden
+          Knopf drücken (je 0,1 s) und erneut testen.</p>
       </section>`
-          : ""
-      }
+      : "";
+    return `
+      ${d.measure ? this._measureHtml(d.measure) : ""}
+      ${offsetCard}
       <section class="card ${busy ? "disabled" : ""}">
-        <h2>${two ? "2 · " : ""}Laufzeit messen <span class="opt">für die Prozentanzeige</span></h2>
-        <p>Das Bett fährt an die Gegen-Endlage und dann einmal durch. Tippe je Seite, sobald der Motor am Endschalter stehen bleibt.</p>
+        <h2>${two ? "2 · " : ""}Laufzeit messen <span class="opt">optional, für die Prozentanzeige</span></h2>
+        <p>Ohne Messung rechnet die Integration mit 25 s von ganz unten nach ganz oben. Bei der Messung fährt das Bett
+          an die Gegen-Endlage (entfällt, wenn es schon dort steht) und dann einmal durch. Tippe, sobald es am Anschlag
+          stehen bleibt.</p>
+        ${two ? "" : `<div class="chips">${chips}</div>`}
         <div class="row">
           <button class="btn" data-measure="up" ${busy ? "disabled" : ""}>Hochfahrt messen</button>
           <button class="btn" data-measure="down" ${busy ? "disabled" : ""}>Runterfahrt messen</button>
         </div>
       </section>
       <section class="card">
-        <h2>Werte ${esc(d.motor_names[m])}</h2>
+        <h2>Alle Werte · ${esc(d.motor_names[m])}</h2>
         <table class="values">
           <thead><tr><th></th>${d.sides.map((s) => `<th>${esc(d.names[s])}</th>`).join("")}</tr></thead>
           <tbody>${[
@@ -437,63 +475,35 @@ class AupingPanel extends HTMLElement {
             )
             .join("")}</tbody>
         </table>
-        <p class="small">Werte lassen sich auch direkt ändern. Für den Sync zählt beim Anlauf nur die Differenz zwischen den Seiten.</p>
+        <p class="small">Für den Gleichlauf zählt beim Anlauf nur die Differenz zwischen den Seiten.</p>
       </section>`;
-  }
-
-  _offsetHtml(o) {
-    const d = this._data;
-    const dirTxt = o.direction > 0 ? "hoch" : "runter";
-    const endTxt = o.direction > 0 ? "unten" : "oben";
-    let body;
-    if (o.phase === "feedback") {
-      const first = o.rounds <= 1 && o.step == null;
-      body = `
-        <p class="question">Welche Seite steht jetzt <b>höher</b>?</p>
-        ${
-          first
-            ? `<div class="row size"><span>Unterschied:</span>
-              <button class="chip ${this._size === "big" ? "active" : ""}" data-size="big">deutlich</button>
-              <button class="chip ${this._size === "small" ? "active" : ""}" data-size="small">nur etwas</button></div>`
-            : ""
-        }
-        <div class="row three">
-          <button class="btn primary" data-answer="a_higher">${esc(d.names.a)} höher</button>
-          <button class="btn ok" data-answer="equal">Gleich hoch</button>
-          <button class="btn primary" data-answer="b_higher">${esc(d.names.b)} höher</button>
-        </div>`;
-    } else {
-      body = `<p class="progress"><span class="spinner"></span>${
-        o.phase === "relevel" ? `Beide Seiten fahren an die Endlage ${endTxt} …` : "Testfahrt läuft – gleich hinschauen …"
-      }</p>`;
-    }
-    return `<section class="card session">
-      <h2>Startversatz ${esc(d.motor_names[o.motor])} ${dirTxt} · Runde ${o.rounds + (o.phase === "feedback" ? 0 : 1)}</h2>
-      ${body}
-      <div class="lagline" id="lagline"></div>
-      <div class="row"><button class="link" data-cancel>Abbrechen</button></div>
-    </section>`;
   }
 
   _measureHtml(m) {
     const d = this._data;
-    const dirTxt = m.direction > 0 ? "oben" : "unten";
+    const end = m.direction > 0 ? "oben" : "unten";
+    const start = m.direction > 0 ? "unten" : "oben";
     if (m.phase === "relevel") {
-      return `<section class="card session"><h2>Laufzeit ${esc(d.motor_names[m.motor])}</h2>
-        <p class="progress"><span class="spinner"></span>Fahre an die Gegen-Endlage …</p>
-        <div class="row"><button class="link" data-cancel>Abbrechen</button></div></section>`;
+      return `<section class="card session"><h2>Laufzeit ${esc(d.motor_names[m.motor])} messen</h2>
+        <p class="progress"><span class="spinner"></span>Beide Seiten fahren erst ganz nach ${start}
+          <span data-remaining></span></p>
+        <div class="row">
+          <button class="btn" data-skip>Steht schon ${start} – weiter</button>
+          <button class="link" data-cancel>Abbrechen</button>
+        </div></section>`;
     }
     const marks = d.sides
       .map(
         (s) => `<div class="stopwatch">
           <div class="sw-name">${esc(d.names[s])}</div>
           <div class="sw-time" data-sw="${s}">0,00</div>
-          <button class="btn primary" data-mark="${s}" ${m.marks[s] != null ? "disabled" : ""}>${dirTxt} angekommen</button>
+          <button class="btn primary" data-mark="${s}" ${m.marks[s] != null ? "disabled" : ""}>${end} angekommen</button>
         </div>`
       )
       .join("");
     const done = d.sides.every((s) => m.marks[s] != null);
     return `<section class="card session"><h2>Laufzeit ${esc(d.motor_names[m.motor])} messen</h2>
+      <p class="small">Tippe je Seite, sobald sie ${end} am Anschlag stehen bleibt.</p>
       <div class="sw-row">${marks}</div>
       ${d.sides.length === 2 ? `<div class="row"><button class="btn" data-mark="both" ${done ? "disabled" : ""}>Beide gleichzeitig angekommen</button></div>` : ""}
       <div class="row">
@@ -550,6 +560,23 @@ class AupingPanel extends HTMLElement {
         <p>Nach Benutzung der Funk-Fernbedienung weiß die Integration nicht, wo das Bett steht. Dann einmal <b>Referenzfahrt</b> machen –
         oder, wenn das Bett gerade sicher ganz flach ist:</p>
         <div class="row"><button class="btn" data-markflat>Alles als „ganz unten“ markieren</button></div>
+      </section>
+      ${
+        two
+          ? `<section class="card">
+        <h2>Namen der Seiten</h2>
+        <div class="names">
+          <label>Seite A (links)<input type="text" maxlength="20" data-name="a" value="${esc(d.names.a)}"></label>
+          <label>Seite B (rechts)<input type="text" maxlength="20" data-name="b" value="${esc(d.names.b)}"></label>
+        </div>
+        <div class="row"><button class="btn primary" data-savenames>Namen speichern</button></div>
+      </section>`
+          : ""
+      }
+      <section class="card">
+        <h2>Letzte Befehle an die Box</h2>
+        <p class="small">Was zuletzt gesendet wurde – hilfreich, wenn sich eine Seite anders verhält als erwartet.</p>
+        <div class="cmdlog" data-commands></div>
       </section>
       <section class="card">
         <h2>Box</h2>
@@ -652,22 +679,46 @@ class AupingPanel extends HTMLElement {
         this._render();
       })
     );
-    root.querySelectorAll("[data-offset]").forEach((b) =>
-      b.addEventListener("click", () => {
-        this._size = "big";
-        this._cmd("offset_start", { motor: this._calibMotor, direction: b.dataset.offset });
+    root.querySelectorAll("[data-adjust]").forEach((b) =>
+      b.addEventListener("click", () => this._cmd("adjust_start", { motor: b.dataset.adjust }))
+    );
+    root.querySelectorAll("[data-adjustok]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const res = await this._cmd("adjust_finish", { apply: true });
+        if (res && res.lags) {
+          const dir = res.direction > 0 ? "hoch" : "runter";
+          this._showToast(`Gespeichert (${dir}): ${this._lagText(res.lags)}`);
+        }
       })
     );
-    root.querySelectorAll("[data-size]").forEach((b) =>
+    root.querySelectorAll("[data-adjustcancel]").forEach((b) =>
+      b.addEventListener("click", () => this._cmd("adjust_finish", { apply: false }))
+    );
+    root.querySelectorAll("[data-goremote]").forEach((b) =>
       b.addEventListener("click", () => {
-        this._size = b.dataset.size;
+        this._tab = "remote";
+        store("tab", this._tab);
+        this._structure = null;
         this._render();
       })
     );
-    root.querySelectorAll("[data-answer]").forEach((b) =>
+    root.querySelectorAll("[data-testmove]").forEach((b) =>
+      b.addEventListener("click", () =>
+        this._cmd("test_move", { motor: this._calibMotor, direction: Number(b.dataset.testmove) > 0 ? "up" : "down" })
+      )
+    );
+    root.querySelectorAll("[data-shift]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const [dir, delta] = b.dataset.shift.split(":").map(Number);
+        this._cmd("shift_lag", { motor: this._calibMotor, direction: dir > 0 ? "up" : "down", delta });
+      })
+    );
+    root.querySelectorAll("[data-skip]").forEach((b) => b.addEventListener("click", () => this._cmd("relevel_skip")));
+    root.querySelectorAll("[data-savenames]").forEach((b) =>
       b.addEventListener("click", async () => {
-        const res = await this._cmd("offset_feedback", { answer: b.dataset.answer, size: this._size });
-        if (res && res.done) this._showToast("Startversatz gespeichert");
+        const val = (side) => root.querySelector(`[data-name="${side}"]`).value;
+        if ((await this._cmd("set_names", { name_a: val("a"), name_b: val("b") })) !== null)
+          this._showToast("Namen gespeichert");
       })
     );
     root.querySelectorAll("[data-measure]").forEach((b) =>
@@ -724,13 +775,13 @@ class AupingPanel extends HTMLElement {
       }
       btn.classList.add("pressed");
       if (navigator.vibrate) navigator.vibrate(15);
-      this._cmd("start_move", { side: this._side, motor, direction: btn.dataset.hold });
+      this._cmd("start_move", { side: btn.dataset.holdside || this._side, motor, direction: btn.dataset.hold });
     };
     const end = () => {
       if (!active) return;
       active = false;
       btn.classList.remove("pressed");
-      this._cmd("stop_motor", { side: this._side, motor });
+      this._cmd("stop_motor", { side: btn.dataset.holdside || this._side, motor });
     };
     btn.addEventListener("pointerdown", start);
     btn.addEventListener("pointerup", end);
@@ -743,6 +794,35 @@ class AupingPanel extends HTMLElement {
     btn.addEventListener("keyup", (e) => {
       if (e.key === " " || e.key === "Enter") end();
     });
+  }
+
+  _lagText(lags) {
+    const d = this._data;
+    const diff = (lags.b ?? 0) - (lags.a ?? 0);
+    if (Math.abs(diff) < 50) return "beide starten gleichzeitig";
+    const later = diff > 0 ? d.names.b : d.names.a;
+    return `${later} startet ${sec(Math.abs(diff))} s später`;
+  }
+
+  _commandsHtml(commands) {
+    if (!commands.length) return `<p class="small">Noch keine Befehle seit dem Start.</p>`;
+    const d = this._data;
+    const side = { 0: "Beide", 1: d.names.a, 2: d.names.b };
+    const act = { 1: "▲", [-1]: "▼" };
+    return `<table class="cmds"><tbody>${commands
+      .slice()
+      .reverse()
+      .map((c) => {
+        const t = new Date(c.time * 1000).toLocaleTimeString("de-DE");
+        const what = Object.entries(c.motors).length
+          ? Object.entries(c.motors)
+              .map(([m, [dir, ms]]) => `${esc(d.motor_names[m] || m)} ${act[dir] || ""} ${sec(ms)} s`)
+              .join(", ")
+          : "Stopp";
+        const res = c.ok === false ? `<span class="err">Fehler: ${esc(c.error || "")}</span>` : c.ok ? `${c.rtt ?? "?"} ms` : "…";
+        return `<tr><td>${t}</td><td>${esc(side[c.cbu] ?? c.cbu)}</td><td>${what}</td><td>${res}</td></tr>`;
+      })
+      .join("")}</tbody></table>`;
   }
 
   // ------------------------------------------------------------------ Dialog
@@ -820,13 +900,16 @@ class AupingPanel extends HTMLElement {
       const [s, m, k] = inp.dataset.cal.split(":");
       inp.value = ((d.calibration[s][m][k] ?? 0) / 1000).toFixed(2);
     });
-    const lagline = root.querySelector("#lagline");
-    if (lagline && d.offset) {
-      const o = d.offset;
-      const key = o.direction > 0 ? "lag_up" : "lag_down";
-      const parts = d.sides.map((s) => `${esc(d.names[s])} ${sec(d.calibration[s][o.motor][key])} s`);
-      lagline.innerHTML = `Anlauf jetzt: ${parts.join(" · ")}${o.step ? ` · Schrittweite ${Math.round(o.step)} ms` : ""}`;
-    }
+    root.querySelectorAll("[data-lagtext]").forEach((el) => {
+      const key = Number(el.dataset.lagtext) > 0 ? "lag_up" : "lag_down";
+      const lags = Object.fromEntries(d.sides.map((s) => [s, d.calibration[s][this._calibMotor][key]]));
+      el.textContent = this._lagText(lags);
+    });
+    root.querySelectorAll("[data-remaining]").forEach((el) => {
+      el.textContent = d.motion_remaining ? `(noch etwa ${Math.ceil(d.motion_remaining)} s)` : "";
+    });
+    const log = root.querySelector("[data-commands]");
+    if (log) log.innerHTML = this._commandsHtml(d.commands || []);
     if (d.measure) {
       for (const s of d.sides) {
         const el = root.querySelector(`[data-sw="${s}"]`);
@@ -978,6 +1061,25 @@ p { margin: 6px 0 10px; line-height: 1.45; }
 }
 .chip.active { background: var(--accent); border-color: var(--accent); color: var(--text-primary-color, #fff); }
 .session { border: 2px solid var(--accent); }
+.link.small { font-size: 13px; padding: 2px 4px; }
+.motor-head { gap: 8px; }
+.motor-head h2 { flex: 1; }
+.adjust-row { display: grid; grid-template-columns: 90px 1fr auto auto; gap: 8px; align-items: center; margin: 8px 0; }
+.adjust-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.holdbtn.small { width: 56px; height: 48px; }
+.holdbtn.small svg { width: 30px; height: 30px; }
+ol.steps { margin: 6px 0 10px; padding-left: 22px; line-height: 1.5; }
+ol.steps li { margin-bottom: 6px; }
+.lag-block { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.lag-head { margin-bottom: 2px; }
+.names { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.names label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.names input { padding: 9px 10px; font: inherit; font-size: 15px; border-radius: 8px; border: 1px solid var(--line); background: var(--primary-background-color); color: var(--primary-text-color); }
+.cmdlog { max-height: 260px; overflow: auto; }
+table.cmds { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.cmds td { padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.cmds td:nth-child(3) { white-space: normal; }
+.err { color: var(--danger); }
 .question { font-size: 17px; }
 .progress { display: flex; gap: 10px; align-items: center; }
 .spinner { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite; }

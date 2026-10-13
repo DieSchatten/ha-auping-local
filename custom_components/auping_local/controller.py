@@ -19,6 +19,7 @@ beide Seiten im Gleichschritt und kommen auf derselben Höhe an.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import logging
@@ -53,10 +54,8 @@ MIN_MOVE_MS = 120  # kürzere Korrekturen lohnen sich nicht (Funk-Latenz)
 SEQ_GAP_S = 0.3  # Pause zwischen Schritten im Modus "nacheinander"
 TICK_S = 0.25
 MEASURE_COMMAND_MS = 60000  # Messfahrt: lang genug für jeden Motor, Endschalter stoppt
-OFFSET_TEST_MS = 4000  # Bewegungsdauer der Versatz-Testfahrt
-OFFSET_STEP_BIG = 300
-OFFSET_STEP_SMALL = 100
-OFFSET_STEP_MIN = 20
+TRAIL_MAX = 200  # gemerkte Fahrten seit der letzten "gleich hoch"-Lage je Seite und Motor
+TEST_MOVE_MS = 3000  # Testfahrt zum Prüfen des Versatzes
 RELEVEL_EXTRA_MS = 1500
 
 
@@ -88,6 +87,9 @@ class MotorState:
     end: float = 0.0  # hier schaltet die Box ab
     endpoint: bool = False  # Fahrt zielt mit Nachlauf auf eine Endlage
     at_end: int = 0  # UP/DOWN: letzte Fahrt ist sicher an dieser Endlage angekommen
+    # Fahrten seit der letzten Lage, in der beide Seiten gleich hoch standen:
+    # [Richtung, Befehlszeitpunkt, Abschaltzeitpunkt]
+    trail: list[list[float]] = field(default_factory=list)
 
 
 @dataclass
@@ -141,8 +143,12 @@ class BedController:
         self.available = True
         self.last_error: str | None = None
         self.measure: dict[str, Any] | None = None
-        self.offset: dict[str, Any] | None = None
-        self.offset_test_ms = OFFSET_TEST_MS
+        self.adjust: dict[str, Any] | None = None
+        # Je Motor: Lage, in der beide Seiten zuletzt sicher gleich hoch standen (oder None)
+        self.level_ref: dict[str, float | None] = {m: None for m in self.motors}
+        self.command_log: deque[dict[str, Any]] = deque(maxlen=40)
+        self._skip_event: asyncio.Event | None = None
+        self._last_stop_at = 0.0
 
         self._pending: list[tuple[float, int, Step]] = []
         self._seq = 0
@@ -281,6 +287,8 @@ class BedController:
             return
         finished = now >= st.end
         st.pos = self.position(side, motor, now)
+        if st.trail and st.trail[-1][2] > now:
+            st.trail[-1][2] = now  # vorzeitig angehalten
         if finished and st.endpoint:
             st.pos = 1.0 if st.direction == UP else 0.0
             st.known = True
@@ -308,8 +316,34 @@ class BedController:
         else:
             self._settle(side, motor, now)
 
+    def _end_state(self, side: str, motor: str, now: float) -> int:
+        """UP/DOWN, wenn die Seite an dieser Endlage steht – auch schon während des Nachlaufs."""
+        st = self.state[side][motor]
+        if st.direction and now < st.end:
+            raw = self._raw_position(side, motor, now)
+            if st.endpoint and ((st.direction == DOWN and raw <= 0.0) or (st.direction == UP and raw >= 1.0)):
+                return st.direction  # Endlage erreicht, Motor läuft nur noch gegen den Anschlag
+            return 0
+        return st.at_end
+
+    def _level_at_end(self, motor: str, now: float | None = None) -> int:
+        """UP/DOWN, wenn alle Seiten nachweislich an derselben Endlage stehen, sonst 0."""
+        now = self._clock() if now is None else now
+        ends = {self._end_state(s, motor, now) for s in self.sides}
+        return ends.pop() if len(ends) == 1 and 0 not in ends else 0
+
+    def _set_level_ref(self, motor: str, pos: float) -> None:
+        self.level_ref[motor] = pos
+        for s in self.sides:
+            self.state[s][motor].trail.clear()
+
     def _apply_step(self, step: Step, started: float) -> None:
         """Box-Semantik nachbilden: ein Befehl setzt alle Motoren der Ziel-CBU(s)."""
+        for motor, (direction, ms) in step.motors.items():
+            if direction and ms > 0 and motor in self.motors:
+                end = self._level_at_end(motor, started)
+                if end:
+                    self._set_level_ref(motor, 1.0 if end == UP else 0.0)
         if self.mode == MODE_SEQUENTIAL and step.cbu != CBU_BOTH:
             # Annahme im Modus "nacheinander": ein Befehl an eine Seite unterbricht die andere.
             for side in self.sides:
@@ -325,6 +359,8 @@ class BedController:
                         # Gleiche Richtung, Motor läuft noch: nur die Abschaltzeit ändert sich.
                         st.end = started + ms / 1000
                         st.endpoint = step.endpoints.get(motor, False)
+                        if st.trail:
+                            st.trail[-1][2] = st.end
                         continue
                     self._settle(side, motor, started)
                     st.at_end = 0
@@ -333,36 +369,45 @@ class BedController:
                     st.move_start = started + self.lag_ms(side, motor, direction) / 1000
                     st.end = started + ms / 1000
                     st.endpoint = step.endpoints.get(motor, False)
+                    st.trail.append([direction, started, st.end])
+                    if len(st.trail) > TRAIL_MAX:
+                        self.level_ref[motor] = None  # zu lange her, keine sichere Bezugslage mehr
+                        st.trail.clear()
                 else:
                     self._settle(side, motor, started)
-        if self.measure:
+        if not step.motors:
+            self._last_stop_at = started
+        meas = self.measure
+        if meas and meas.get("phase") == "running" and step.motors:
             for side in step.sides:
-                if side in self.measure["t0"] and self.measure["t0"][side] is None:
-                    self.measure["t0"][side] = started
+                if side in meas["t0"] and meas["t0"][side] is None:
+                    meas["t0"][side] = started
         self._ensure_ticker()
 
     # ------------------------------------------------------------------ Planung
 
     def _plan_side(
-        self, side: str, targets: dict[str, float], now: float, keep_others: bool = True
+        self, side: str, targets: dict[str, float], now: float, keep_others: bool = True, hold: bool = False
     ) -> SidePlan:
+        """``hold``: Taste wird gehalten – Endlagen-Ziele mit vollem Hub schicken (das Loslassen
+        beendet die Fahrt), damit eine falsche Schätzung die Fahrt nicht zu früh abbricht."""
         plan: SidePlan = {}
         for motor in self.motors:
             if motor in targets:
                 x = targets[motor]
                 p = self.position(side, motor, now)
                 st = self.state[side][motor]
-                at_target_end = not self.is_moving(side, motor, now) and (
+                at_target_end = not hold and not self.is_moving(side, motor, now) and (
                     (x <= 0.0 and st.at_end == DOWN) or (x >= 1.0 and st.at_end == UP)
                 )
                 if at_target_end:
                     continue  # steht nachweislich schon am Endschalter
                 if x <= 0.0:
                     t = self.travel_ms(side, motor, DOWN)
-                    plan[motor] = (DOWN, p * t + overrun_ms(t), True)
+                    plan[motor] = (DOWN, (1.0 if hold else p) * t + overrun_ms(t), True)
                 elif x >= 1.0:
                     t = self.travel_ms(side, motor, UP)
-                    plan[motor] = (UP, (1.0 - p) * t + overrun_ms(t), True)
+                    plan[motor] = (UP, (1.0 if hold else 1.0 - p) * t + overrun_ms(t), True)
                 else:
                     delta = x - p
                     direction = UP if delta > 0 else DOWN
@@ -494,14 +539,23 @@ class BedController:
                     pass
                 continue
             self._pending.pop(0)
+            entry: dict[str, Any] = {
+                "time": time.time(),
+                "cbu": step.cbu,
+                "motors": {m: [d, ms] for m, (d, ms) in step.motors.items()},
+            }
+            self.command_log.append(entry)
             try:
                 started = await self.api.send_motors(step.cbu, step.motors)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Befehl an die Box fehlgeschlagen: %s", err)
+                entry.update(ok=False, error=str(err))
                 self.available = False
                 self.last_error = str(err)
                 self._notify()
                 continue
+            rtt = getattr(self.api, "last_rtt_ms", None)
+            entry.update(ok=True, rtt=None if rtt is None else round(rtt))
             self.available = True
             self.last_error = None
             self._apply_step(step, started)
@@ -586,14 +640,14 @@ class BedController:
                 out[side][m] = limited
         return out
 
-    async def move_to(self, targets: dict[str, dict[str, float]]) -> None:
+    async def move_to(self, targets: dict[str, dict[str, float]], hold: bool = False) -> None:
         """Ziele je Seite und Motor (0..1) anfahren – jede Seite mit eigener Laufzeit."""
         now = self._clock()
         self._settle_finished(now)
         limit_before = self._limit_hit
         targets = self._limit_targets(targets, now)
         plans = {
-            side: self._plan_side(side, motor_targets, now)
+            side: self._plan_side(side, motor_targets, now, hold=hold)
             for side, motor_targets in targets.items()
             if side in self.sides
         }
@@ -606,7 +660,7 @@ class BedController:
     async def start_move(self, sides: list[str], motor: str, direction: int) -> None:
         """Halten: Richtung Endlage losfahren (wird mit stop_motor beendet)."""
         target = 1.0 if direction == UP else 0.0
-        await self.move_to({s: {motor: target} for s in sides})
+        await self.move_to({s: {motor: target} for s in sides}, hold=True)
 
     async def stop_motor(self, sides: list[str], motor: str) -> None:
         """Loslassen: bei beiden Seiten holt eine zurückliegende Seite auf."""
@@ -648,8 +702,7 @@ class BedController:
         eps[motor] = False
         self._schedule(_split_long(Step(0.0, CBU_FOR_SIDE[side], (side,), others, eps)))
 
-    async def stop_all(self) -> None:
-        self._cancel_calibration()
+    def _stop_now(self) -> None:
         now = self._clock()
         self._settle_finished(now)
         if len(self.sides) == 2:
@@ -657,6 +710,10 @@ class BedController:
         else:
             steps = [Step(0.0, CBU_FOR_SIDE[s], (s,), {}) for s in self.sides]
         self._schedule(steps)
+
+    async def stop_all(self) -> None:
+        self._cancel_calibration()
+        self._stop_now()
 
     async def flat(self) -> None:
         await self.move_to({s: {m: 0.0 for m in self.motors} for s in self.sides})
@@ -786,7 +843,8 @@ class BedController:
         self._reanchor(side, motor, now)
         st = self.state[side][motor]
         st.pos = min(1.0, max(0.0, pos))
-        st.at_end = 0
+        # "Steht ganz unten/oben" vom Benutzer: dann muss dort nichts mehr angefahren werden.
+        st.at_end = (DOWN if st.pos <= 0.0 else UP if st.pos >= 1.0 else 0) if known and not st.direction else 0
         if st.direction:
             st.start = now
             st.move_start = max(st.move_start, now)
@@ -801,29 +859,206 @@ class BedController:
             self._calib_task.cancel()
         self._calib_task = None
         self.measure = None
-        self.offset = None
+        self._skip_event = None
 
-    async def _relevel(self, motor: str, direction: int, full: bool) -> None:
-        """Beide Seiten sicher an die Endlage in ``direction`` fahren.
+    def at_end(self, motor: str, direction: int) -> bool:
+        """Stehen alle Seiten nachweislich an dieser Endlage?"""
+        now = self._clock()
+        return all(
+            self.state[s][motor].at_end == direction and not self.is_moving(s, motor, now) for s in self.sides
+        )
 
-        ``full``: unabhängig von der Schätzung mehr als einen Vollhub fahren
-        (für den Anfang, wenn Position oder Laufzeit noch nicht stimmen).
+    async def _relevel(self, motor: str, direction: int) -> None:
+        """Beide Seiten an die Endlage in ``direction`` fahren.
+
+        Entfällt, wenn sie nachweislich schon dort stehen. Mit ``relevel_skip`` kann der
+        Benutzer abkürzen ("steht schon unten").
         """
+        if self.at_end(motor, direction):
+            return
         now = self._clock()
         self._settle_finished(now)
         plans: dict[str, SidePlan] = {}
         for s in self.sides:
             t = self.travel_ms(s, motor, direction)
+            st = self.state[s][motor]
             p = self.position(s, motor, now)
-            dist = 1.3 if full else (1.0 - p if direction == UP else p) * 1.1
-            # Zuschlag deckt eine noch nicht kalibrierte Anlaufverzögerung ab.
-            plans[s] = {motor: (direction, dist * t + overrun_ms(t) + RELEVEL_EXTRA_MS, True)}
+            dist = (1.0 - p if direction == UP else p) if st.known else 1.0
+            # Zuschläge decken eine noch ungenaue Laufzeit und einen unbekannten Anlauf ab.
+            plans[s] = {motor: (direction, dist * t * 1.1 + overrun_ms(t) + RELEVEL_EXTRA_MS, True)}
         self._schedule(self._build_steps(plans, now))
+        self._skip_event = asyncio.Event()
+        self._notify()
+        motion = asyncio.ensure_future(self.wait_motion())
+        skip = asyncio.ensure_future(self._skip_event.wait())
+        try:
+            done, _ = await asyncio.wait({motion, skip}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            motion.cancel()
+            skip.cancel()
+            self._skip_event = None
+        if skip in done:
+            self._stop_now()
+            await self.wait_idle()
+            for s in self.sides:
+                st = self.state[s][motor]
+                st.pos = 1.0 if direction == UP else 0.0
+                st.known = True
+                st.at_end = direction
+            self._notify()
+
+    def relevel_skip(self) -> bool:
+        """Benutzer bestätigt: das Bett steht schon an der Endlage."""
+        if self._skip_event is None:
+            return False
+        self._skip_event.set()
+        return True
+
+    # --- Nachjustieren: Benutzer fährt die zurückliegende Seite nach, bis beide gleich hoch sind
+
+    def adjust_start(self, motor: str) -> None:
+        if len(self.sides) < 2:
+            raise ValueError("Nachjustieren ist nur bei zwei Seiten nötig")
+        if self.level_ref.get(motor) is None and not self._level_at_end(motor):
+            raise ValueError(
+                "Dafür müssen beide Seiten vorher gleich hoch gestanden haben: erst „Alles flach“ "
+                "(für runter: ganz hoch), dann mit „Beide“ ein Stück fahren und nachjustieren."
+            )
+        if not any(self.state[s][motor].trail for s in self.sides):
+            raise ValueError("Erst mit „Beide“ ein Stück fahren, dann nachjustieren.")
+        self.adjust = {"motor": motor}
+        self._notify()
+
+    async def adjust_finish(self, apply: bool) -> dict[str, Any]:
+        """``apply``: beide Seiten stehen jetzt gleich hoch – Versatz daraus berechnen."""
+        adj = self.adjust
+        self.adjust = None
+        if not adj or not apply:
+            self._notify()
+            return {}
+        motor = adj["motor"]
         await self.wait_motion()
+        try:
+            result = self._solve_lag(motor)
+        finally:
+            self._save()
+            self._notify()
+        return result
+
+    def _trail_moved(self, side: str, motor: str, direction: int, lag: float | None, now: float) -> float:
+        """Gefahrener Weg (Anteil) einer Seite seit der Bezugslage, mit ``lag`` für ``direction``."""
+        total = 0.0
+        for d, start, end in self.state[side][motor].trail:
+            d = int(d)
+            used = lag if (lag is not None and d == direction) else self.lag_ms(side, motor, d)
+            moved = max(0.0, min(end, now) - (start + used / 1000))
+            total += d * moved * 1000 / self.travel_ms(side, motor, d)
+        return total
+
+    def _solve_lag(self, motor: str) -> dict[str, Any]:
+        """Anlauf so bestimmen, dass beide Seiten seit der Bezugslage gleich weit gefahren sind."""
+        now = self._clock()
+        ref = self.level_ref.get(motor)
+        if ref is None:
+            end = self._level_at_end(motor)
+            ref = 1.0 if end == UP else 0.0
+        segments = [(seg, s) for s in self.sides for seg in self.state[s][motor].trail]
+        if not segments:
+            raise ValueError("Keine Fahrt seit der Bezugslage gefunden")
+        last_seg, corrected = max(segments, key=lambda x: x[0][1])
+        direction = int(last_seg[0])
+        key = _lkey(direction)
+        result: dict[str, Any] | None = None
+        for side in (corrected, *[s for s in self.sides if s != corrected]):
+            other = next(s for s in self.sides if s != side)
+            target = self._trail_moved(other, motor, direction, None, now)
+
+            def diff(lag: float) -> float:
+                return self._trail_moved(side, motor, direction, lag, now) - target
+
+            lo, hi = 0.0, float(MAX_LAG_MS)
+            if diff(lo) * diff(hi) > 0:
+                continue  # mit dieser Seite nicht lösbar, andere probieren
+            for _ in range(40):
+                mid = (lo + hi) / 2
+                if diff(lo) * diff(mid) <= 0:
+                    hi = mid
+                else:
+                    lo = mid
+            self.calibration[side][motor][key] = _clamp_lag((lo + hi) / 2)
+            result = {"motor": motor, "direction": direction, "side": side}
+            break
+        if result is None:
+            raise ValueError(
+                "Daraus lässt sich kein Versatz bestimmen. Bitte von „Alles flach“ aus neu anfangen."
+            )
+        # Beide stehen jetzt gleich hoch: das ist die neue Bezugslage.
+        level = sum(
+            min(1.0, max(0.0, ref + self._trail_moved(s, motor, direction, None, now))) for s in self.sides
+        ) / len(self.sides)
+        for s in self.sides:
+            st = self.state[s][motor]
+            st.pos, st.known, st.direction, st.at_end = level, True, 0, 0
+        self._set_level_ref(motor, level)
+        result["lags"] = {s: self.lag_ms(s, motor, direction) for s in self.sides}
+        return result
+
+    # --- Prüfen und feinjustieren
+
+    def _blocked(self, motor: str, direction: int) -> str | None:
+        """Grund, warum in diese Richtung nicht gefahren werden kann (Endlage), sonst None."""
+        now = self._clock()
+        for s in self.sides:
+            st = self.state[s][motor]
+            p = self.position(s, motor, now)
+            if direction == UP and (st.at_end == UP or (st.known and p >= 0.97)):
+                return "Das Bett steht schon ganz oben – erst ein Stück runterfahren."
+            if direction == DOWN and (st.at_end == DOWN or (st.known and p <= 0.03)):
+                return "Das Bett steht schon ganz unten – erst ein Stück hochfahren."
+        return None
+
+    async def calib_test_move(self, motor: str, direction: int, ms: int = TEST_MOVE_MS) -> None:
+        """Kurze Fahrt beider Seiten mit Ausgleich – zum Beobachten, ob sie gleichzeitig loslaufen."""
+        self._cancel_calibration()
+        now = self._clock()
+        self._settle_finished(now)
+        reason = self._blocked(motor, direction)
+        if reason:
+            raise ValueError(reason)
+        targets = {
+            s: {
+                motor: min(
+                    1.0, max(0.0, self.position(s, motor, now) + direction * ms / self.travel_ms(s, motor, direction))
+                )
+            }
+            for s in self.sides
+        }
+        await self.move_to(targets)
+
+    def shift_lag(self, motor: str, direction: int, delta_ms: float) -> None:
+        """Versatz nachjustieren: positiv = Seite A startet später (B bekommt mehr Vorlauf)."""
+        self._shift_lag(motor, direction, delta_ms)
+        self._save()
+        self._notify()
+
+    def _shift_lag(self, motor: str, direction: int, delta: float) -> None:
+        """Differenz lag_b - lag_a um ``delta`` verschieben; die kleinere bleibt die Basis."""
+        if SIDE_B not in self.sides:
+            return
+        key = _lkey(direction)
+        la = self.calibration[SIDE_A][motor][key]
+        lb = self.calibration[SIDE_B][motor][key]
+        base = min(la, lb)
+        diff = lb - la + delta
+        new = {SIDE_A: base + max(0.0, -diff), SIDE_B: base + max(0.0, diff)}
+        for side, value in new.items():
+            self.calibration[side][motor][key] = _clamp_lag(value)
+
+    # --- Vollhub-Laufzeit messen
 
     async def calib_measure_start(self, motor: str, direction: int) -> None:
-        """Vollhub messen: erst an die Gegen-Endlage, dann beide Seiten bis zum
-        Endschalter fahren; der Benutzer tippt je Seite "angekommen"."""
+        """Vollhub messen: erst an die Gegen-Endlage (entfällt, wenn sie schon dort stehen),
+        dann bis zum Endschalter fahren; der Benutzer tippt je Seite "angekommen"."""
         self._cancel_calibration()
         self.measure = {
             "motor": motor,
@@ -840,11 +1075,7 @@ class BedController:
         if not m:
             return
         motor, direction = m["motor"], m["direction"]
-        known = all(self.state[s][motor].known for s in self.sides)
-        # t0 erst nach dem Anfahren der Gegen-Endlage erfassen.
-        self.measure = None
-        await self._relevel(motor, -direction, full=not known)
-        self.measure = m
+        await self._relevel(motor, -direction)
         m["phase"] = "running"
         now = self._clock()
         if len(self.sides) == 2 and self.mode == MODE_SEQUENTIAL:
@@ -862,7 +1093,7 @@ class BedController:
         self._notify()
 
     def calib_mark(self, side: str) -> float | None:
-        if not self.measure or self.measure["t0"].get(side) is None:
+        if not self.measure or self.measure["t0"].get(side) is None or side in self.measure["marks"]:
             return None
         elapsed = (self._clock() - self.measure["t0"][side]) * 1000
         self.measure["marks"][side] = round(elapsed)
@@ -875,7 +1106,8 @@ class BedController:
             return {}
         marks = dict(m["marks"])
         motor, direction = m["motor"], m["direction"]
-        await self.stop_all()
+        self._cancel_calibration()
+        self._stop_now()
         await self.wait_idle()
         result = {}
         if apply:
@@ -888,86 +1120,6 @@ class BedController:
         self._save()
         self._notify()
         return result
-
-    async def calib_offset_start(self, motor: str, direction: int) -> None:
-        """Versatz-Abgleich starten: Endlage anfahren, Testfahrt, dann Rückmeldung abwarten."""
-        self._cancel_calibration()
-        self.offset = {
-            "motor": motor,
-            "direction": direction,
-            "phase": "relevel",
-            "step": None,
-            "last": None,
-            "rounds": 0,
-        }
-        self._start_offset_round()
-
-    def _start_offset_round(self) -> None:
-        if self.offset:
-            self.offset["phase"] = "relevel"
-        self._calib_task = asyncio.get_running_loop().create_task(self._offset_round())
-
-    async def _offset_round(self) -> None:
-        ofs = self.offset
-        if not ofs:
-            return
-        motor, direction = ofs["motor"], ofs["direction"]
-        both = list(self.sides)
-        # 1. Beide Seiten an die Endlage: dort stehen sie garantiert gleich hoch.
-        ofs["phase"] = "relevel"
-        self._notify()
-        base = 0.0 if direction == UP else 1.0
-        await self._relevel(motor, -direction, full=ofs["rounds"] == 0)
-        # 2. Testfahrt: gleiche Strecke für beide Seiten mit aktueller Kompensation.
-        ofs["phase"] = "test"
-        self._notify()
-        travel = min(self.travel_ms(s, motor, direction) for s in both)
-        distance = min(0.45, self.offset_test_ms / travel)
-        target = base + distance if direction == UP else base - distance
-        await self.move_to({s: {motor: target} for s in both})
-        await self.wait_motion()
-        ofs["phase"] = "feedback"
-        ofs["rounds"] += 1
-        self._notify()
-
-    async def calib_offset_feedback(self, answer: str, size: str = "small") -> dict[str, Any]:
-        """``answer``: "a_higher" | "b_higher" | "equal". ``size``: "big" | "small"."""
-        ofs = self.offset
-        if not ofs or ofs["phase"] != "feedback":
-            return {}
-        motor, direction = ofs["motor"], ofs["direction"]
-        if answer == "equal":
-            lags = {s: self.lag_ms(s, motor, direction) for s in self.sides}
-            self.offset = None
-            self._save()
-            self._notify()
-            return {"done": True, "lags": lags}
-        step = ofs["step"]
-        if step is None:
-            step = OFFSET_STEP_BIG if size == "big" else OFFSET_STEP_SMALL
-        elif ofs["last"] is not None and ofs["last"] != answer:
-            step = max(OFFSET_STEP_MIN, step / 2)  # Vorzeichenwechsel: Schritt halbieren
-        ofs["step"] = step
-        ofs["last"] = answer
-        # Hoch: höhere Seite ist zu viel gefahren -> die andere braucht mehr Vorlauf.
-        # Runter: höhere Seite ist zu wenig gefahren -> sie braucht mehr Vorlauf.
-        b_needs_more = (answer == "a_higher") == (direction == UP)
-        self._shift_lag(motor, direction, step if b_needs_more else -step)
-        self._start_offset_round()
-        return {"done": False, "step": step, "lags": {s: self.lag_ms(s, motor, direction) for s in self.sides}}
-
-    def _shift_lag(self, motor: str, direction: int, delta: float) -> None:
-        """Differenz lag_b - lag_a um ``delta`` verschieben; die kleinere bleibt die Basis."""
-        if SIDE_B not in self.sides:
-            return
-        key = _lkey(direction)
-        la = self.calibration[SIDE_A][motor][key]
-        lb = self.calibration[SIDE_B][motor][key]
-        base = min(la, lb)
-        diff = lb - la + delta
-        new = {SIDE_A: base + max(0.0, -diff), SIDE_B: base + max(0.0, diff)}
-        for side, value in new.items():
-            self.calibration[side][motor][key] = _clamp_lag(value)
 
     def calib_cancel(self) -> None:
         self._cancel_calibration()
@@ -982,7 +1134,7 @@ class BedController:
             measure = {
                 "motor": self.measure["motor"],
                 "direction": self.measure["direction"],
-                "phase": self.measure["phase"],
+                "phase": "relevel" if self._skip_event else self.measure["phase"],
                 "elapsed": {
                     s: None if t0 is None else round((now - t0) * 1000)
                     for s, t0 in self.measure["t0"].items()
@@ -1015,10 +1167,18 @@ class BedController:
             else None,
             "active_favorite": self.active_favorite(),
             "measure": measure,
-            "offset": None
-            if not self.offset
-            else {k: self.offset[k] for k in ("motor", "direction", "phase", "step", "rounds")},
+            "adjust": self.adjust,
+            "level_ref": {m: self.level_ref[m] is not None or bool(self._level_at_end(m)) for m in self.motors},
+            "relevel": self._skip_event is not None,
+            "motion_remaining": self._motion_remaining(now),
+            "commands": list(self.command_log)[-15:],
         }
+
+    def _motion_remaining(self, now: float) -> float | None:
+        ends = [
+            self.state[s][m].end - now for s in self.sides for m in self.motors if self.is_moving(s, m, now)
+        ]
+        return round(max(ends), 1) if ends else None
 
 
 def _clamp_travel(ms: float) -> float:

@@ -191,10 +191,20 @@ async def ws_command(hass: HomeAssistant, connection: websocket_api.ActiveConnec
                 ctl.calib_mark(side)
         elif action == "measure_finish":
             result = await ctl.calib_measure_finish(bool(d.get("apply", True)))
-        elif action == "offset_start":
-            await ctl.calib_offset_start(d["motor"], _dir(d["direction"]))
-        elif action == "offset_feedback":
-            result = await ctl.calib_offset_feedback(d["answer"], d.get("size", "small"))
+        elif action == "relevel_skip":
+            result = ctl.relevel_skip()
+        elif action == "adjust_start":
+            ctl.adjust_start(d["motor"])
+        elif action == "adjust_finish":
+            result = await ctl.adjust_finish(bool(d.get("apply", True)))
+        elif action == "test_move":
+            await ctl.calib_test_move(d["motor"], _dir(d["direction"]))
+        elif action == "shift_lag":
+            ctl.shift_lag(d["motor"], _dir(d["direction"]), float(d["delta"]))
+        elif action == "set_names":
+            from . import apply_names  # erst zur Laufzeit, sonst Kreisimport
+
+            apply_names(hass, entry, d.get("name_a"), d.get("name_b"))
         elif action == "calib_cancel":
             ctl.calib_cancel()
             await ctl.stop_all()

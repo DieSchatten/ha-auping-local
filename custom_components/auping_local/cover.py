@@ -22,14 +22,12 @@ ICONS = {
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     ctl = entry.runtime_data.controller
-    names = entry.runtime_data.names
     entities: list[AupingCover] = []
     for motor in ctl.motors:
         if len(ctl.sides) == 2:
-            entities.append(AupingCover(entry, motor, list(ctl.sides), "both", f"{MOTOR_NAMES[motor]} beide"))
+            entities.append(AupingCover(entry, motor, list(ctl.sides), "both"))
         for side in ctl.sides:
-            label = MOTOR_NAMES[motor] if len(ctl.sides) == 1 else f"{MOTOR_NAMES[motor]} {names[side]}"
-            entities.append(AupingCover(entry, motor, [side], side, label))
+            entities.append(AupingCover(entry, motor, [side], side))
     async_add_entities(entities)
 
 
@@ -38,12 +36,20 @@ class AupingCover(AupingEntity, CoverEntity):
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP | CoverEntityFeature.SET_POSITION
     )
 
-    def __init__(self, entry, motor: str, sides: list[str], key: str, name: str) -> None:
+    def __init__(self, entry, motor: str, sides: list[str], key: str) -> None:
         super().__init__(entry, f"cover_{motor}_{key}")
         self._motor = motor
         self._sides = sides
-        self._attr_name = name
         self._attr_icon = ICONS.get(motor, "mdi:bed")
+
+    @property
+    def name(self) -> str:
+        """Folgt den im Bedienfeld geänderten Seitennamen."""
+        if len(self._sides) > 1:
+            return f"{MOTOR_NAMES[self._motor]} beide"
+        if len(self.controller.sides) == 1:
+            return MOTOR_NAMES[self._motor]
+        return f"{MOTOR_NAMES[self._motor]} {self._data.names[self._sides[0]]}"
 
     def _positions(self) -> list[float]:
         return [self.controller.position(s, self._motor) for s in self._sides]

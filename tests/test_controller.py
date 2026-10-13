@@ -496,51 +496,159 @@ async def test_measure_full_travel():
     await ctl.async_shutdown()
 
 
-async def answer_offset_rounds(ctl: BedController, sim: SimBox, max_rounds: int = 14) -> dict:
-    """Spielt den Benutzer: schaut hin und sagt, welche Seite höher steht."""
-    for _ in range(max_rounds):
-        for _ in range(400):
-            if ctl.offset and ctl.offset["phase"] == "feedback":
-                break
-            await asyncio.sleep(0.05)
-        else:
-            raise AssertionError("Testfahrt wurde nicht fertig")
-        d = diff(sim)
-        if d > 0.008:
-            answer = "a_higher"
-        elif d < -0.008:
-            answer = "b_higher"
-        else:
-            answer = "equal"
-        result = await ctl.calib_offset_feedback(answer, "big")
-        if result.get("done"):
-            return result
-    raise AssertionError("Versatz-Abgleich konvergiert nicht")
+def at_bottom(ctl: BedController, sim: SimBox, motor: str = "back") -> None:
+    for s in ("a", "b"):
+        ctl.state[s][motor].pos = 0.0
+        ctl.state[s][motor].known = True
+        ctl.state[s][motor].at_end = DOWN
+        sim.motors[s][motor].pos = 0.0
 
 
-@pytest.mark.parametrize("direction,expected", [(UP, 400), (DOWN, 200)])
-async def test_offset_calibration_finds_lag_difference(direction, expected):
-    ctl, sim = make(calibrate_lag=False, start=0.3)
-    ctl.offset_test_ms = 700
-    await ctl.calib_offset_start("back", direction)
-    result = await answer_offset_rounds(ctl, sim)
-    key = "lag_up" if direction == UP else "lag_down"
-    found = ctl.calibration["b"]["back"][key] - ctl.calibration["a"]["back"][key]
-    assert abs(found - expected) < 40, result
-    # Danach fährt das Bett in dieser Richtung synchron
-    target = 0.85 if direction == UP else 0.15
-    await ctl.move_to({"a": {"back": target}, "b": {"back": target}})
+async def hold(ctl: BedController, sides, motor: str, direction: int, seconds: float) -> None:
+    await ctl.start_move(sides, motor, direction)
+    await asyncio.sleep(seconds)
+    await ctl.stop_motor(sides, motor)
+
+
+async def test_adjust_learns_start_offset():
+    """Ablauf wie vom Benutzer gewünscht: flach -> beide hoch -> zurückliegende Seite nachfahren -> passt."""
+    ctl, sim = make(calibrate_lag=False)
+    at_bottom(ctl, sim)
+    with pytest.raises(ValueError):
+        ctl.adjust_start("back")  # noch nicht gefahren
+    await hold(ctl, ["a", "b"], "back", UP, 1.6)
+    await settle(ctl, sim)
+    assert diff(sim) > 0.15  # B (später anlaufend) liegt zurück
+    ctl.adjust_start("back")
+    # Benutzer fährt B nach, bis beide gleich hoch sind (mit B's eigenem Anlauf)
+    needed = diff(sim) * 2000 / 1000 + 0.5
+    await hold(ctl, ["b"], "back", UP, needed)
     await settle(ctl, sim)
     assert abs(diff(sim)) < 0.02
+    result = await ctl.adjust_finish(apply=True)
+    found = ctl.calibration["b"]["back"]["lag_up"] - ctl.calibration["a"]["back"]["lag_up"]
+    assert result["side"] == "b" and abs(found - 400) < 90, result
+    assert abs(ctl.position("a", "back") - ctl.position("b", "back")) < 0.001
+    # Danach fahren beide im Gleichschritt (kurz, damit keine Seite oben anschlägt)
+    await hold(ctl, ["a", "b"], "back", UP, 0.6)
+    await settle(ctl, sim)
+    # Restfehler ≈ halber Anlauf der früheren Seite (50 ms): bei 2 s Hub 2,5 %, beim echten Bett ~0,2 %
+    assert abs(diff(sim)) < 0.05
+    # Und noch einmal nachjustieren macht es genauer
+    ctl.adjust_start("back")
+    await ctl.adjust_finish(apply=True)
     await ctl.async_shutdown()
 
 
-async def test_offset_calibration_cancel():
-    ctl, sim = make(calibrate_lag=False)
-    await ctl.calib_offset_start("back", UP)
-    await asyncio.sleep(0.2)
-    ctl.calib_cancel()
-    assert ctl.offset is None
-    await ctl.stop_all()
+async def test_adjust_after_flat_even_during_overrun():
+    """Nach „Alles flach“ sofort hochfahren, obwohl der Nachlauf noch läuft – Bezug muss stimmen."""
+    ctl, sim = make(calibrate_lag=False, start=0.5)
+    await ctl.flat()
+    await asyncio.sleep(1.05)  # unten angekommen (0,9 s), Nachlauf läuft noch bis 1,3 s
+    assert ctl.any_moving()
+    await hold(ctl, ["a", "b"], "back", UP, 1.4)
     await settle(ctl, sim)
+    ctl.adjust_start("back")  # darf nicht abgelehnt werden
+    await ctl.adjust_finish(apply=False)
+    await ctl.async_shutdown()
+
+
+async def test_adjust_down_from_top():
+    ctl, sim = make(calibrate_lag=False, start=1.0)
+    for s in ("a", "b"):
+        ctl.state[s]["back"].at_end = UP
+    await hold(ctl, ["a", "b"], "back", DOWN, 1.4)
+    await settle(ctl, sim)
+    assert diff(sim) < -0.08  # B fährt später los, steht also höher
+    ctl.adjust_start("back")
+    needed = -diff(sim) * 1800 / 1000 + 0.35
+    await hold(ctl, ["b"], "back", DOWN, needed)
+    await settle(ctl, sim)
+    await ctl.adjust_finish(apply=True)
+    found = ctl.calibration["b"]["back"]["lag_down"] - ctl.calibration["a"]["back"]["lag_down"]
+    assert abs(found - 200) < 90
+    await ctl.async_shutdown()
+
+
+async def test_adjust_needs_level_reference():
+    ctl, sim = make(calibrate_lag=False, start=0.4)
+    for s in ("a", "b"):
+        ctl.state[s]["back"].at_end = 0
+    await hold(ctl, ["a", "b"], "back", UP, 0.5)
+    await settle(ctl, sim)
+    with pytest.raises(ValueError, match="gleich hoch"):
+        ctl.adjust_start("back")
+    await ctl.async_shutdown()
+
+
+async def test_adjust_cancel_changes_nothing():
+    ctl, sim = make(calibrate_lag=False)
+    at_bottom(ctl, sim)
+    await hold(ctl, ["a", "b"], "back", UP, 0.8)
+    await settle(ctl, sim)
+    ctl.adjust_start("back")
+    assert ctl.snapshot()["adjust"] == {"motor": "back"}
+    assert await ctl.adjust_finish(apply=False) == {}
+    assert ctl.calibration["b"]["back"]["lag_up"] == 0
+    await ctl.async_shutdown()
+
+
+async def test_fine_tune_and_test_move():
+    ctl, sim = make(start=0.3)
+    ctl.shift_lag("back", UP, 100)  # "Links fuhr zuerst los": A bekommt mehr Verzögerung
+    assert ctl.calibration["b"]["back"]["lag_up"] - ctl.calibration["a"]["back"]["lag_up"] == 500
+    ctl.shift_lag("back", UP, -100)
+    await ctl.calib_test_move("back", UP)
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - (0.3 + 3000 / 2000)) < 0.05 or sim.position("a", "back") == 1.0
+    assert abs(diff(sim)) < 0.03
+    with pytest.raises(ValueError, match="ganz oben"):
+        await ctl.calib_test_move("back", UP)
+    await ctl.async_shutdown()
+
+
+async def test_measure_skips_relevel_when_already_there():
+    ctl, sim = make(calibrate_travel=False)
+    at_bottom(ctl, sim)
+    for s in ("a", "b"):
+        ctl.calibration[s]["back"].update(up=3000, down=3000)
+    sent = len(sim.log)
+    await ctl.calib_measure_start("back", UP)
+    await asyncio.sleep(0.2)
+    assert ctl.measure["phase"] == "running"
+    assert all(b["motor_2"]["Action"] == 1 for _, _, b in sim.log[sent:])  # kein Runterfahren
+    await ctl.calib_measure_finish(apply=False)
+    await settle(ctl, sim)
+    await ctl.async_shutdown()
+
+
+async def test_relevel_can_be_skipped():
+    ctl, sim = make(calibrate_travel=False, start=0.0)
+    for s in ("a", "b"):
+        ctl.state[s]["back"].known = False  # Lage unbekannt -> würde lange runterfahren
+    await ctl.calib_measure_start("back", UP)
+    await asyncio.sleep(0.3)
+    assert ctl.snapshot()["relevel"] and ctl.snapshot()["motion_remaining"] > 10
+    assert ctl.relevel_skip()
+    await asyncio.sleep(0.3)
+    assert ctl.measure["phase"] == "running"
+    assert ctl.state["a"]["back"].at_end == 0  # misst schon wieder hoch
+    await ctl.calib_measure_finish(apply=False)
+    await settle(ctl, sim)
+    await ctl.async_shutdown()
+
+
+def test_marking_flat_counts_as_end_position():
+    ctl, _ = make(start=0.2)
+    for s in ("a", "b"):
+        ctl.set_position(s, "back", 0.0)
+    assert ctl.at_end("back", DOWN)
+
+
+async def test_command_log():
+    ctl, sim = make()
+    await ctl.move_to({"a": {"back": 0.2}})
+    await settle(ctl, sim)
+    log = ctl.snapshot()["commands"]
+    assert log[-1]["cbu"] == 1 and log[-1]["ok"] and log[-1]["motors"]["back"][0] == UP
     await ctl.async_shutdown()

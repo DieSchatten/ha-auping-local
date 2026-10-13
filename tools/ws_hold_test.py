@@ -53,9 +53,10 @@ async def main() -> None:
         t0 = time.monotonic()
         await call({"type": "auping_local/command", "entry_id": entry, "action": "start_move",
                     "data": {"side": side, "motor": motor, "direction": direction}})
-        while time.monotonic() - t0 < hold:
-            await asyncio.sleep(0.4)
-            show(f"{time.monotonic() - t0:.1f} s", await sim())
+        while (left := hold - (time.monotonic() - t0)) > 0:
+            await asyncio.sleep(min(0.4, left))
+            if hold - (time.monotonic() - t0) > 0.05:
+                show(f"{time.monotonic() - t0:.1f} s", await sim())
         await call({"type": "auping_local/command", "entry_id": entry, "action": "stop_motor",
                     "data": {"side": side, "motor": motor}})
         await asyncio.sleep(2.5)

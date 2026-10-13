@@ -89,6 +89,21 @@ def entry_settings(entry: ConfigEntry) -> dict[str, Any]:
     }
 
 
+def apply_names(hass: HomeAssistant, entry: ConfigEntry, name_a: str | None, name_b: str | None) -> None:
+    """Namen der Seiten sofort übernehmen (auch in den Entitäten) und in den Optionen merken."""
+    names = entry.runtime_data.names
+    options = dict(entry.options)
+    for side, key, value in ((SIDE_A, CONF_NAME_A, name_a), (SIDE_B, CONF_NAME_B, name_b)):
+        if value is None:
+            continue
+        value = " ".join(str(value).split())[:20]
+        if not value:
+            raise ValueError("Der Name darf nicht leer sein")
+        names[side] = options[key] = value
+    hass.config_entries.async_update_entry(entry, options=options)
+    entry.runtime_data.controller._notify()  # noqa: SLF001
+
+
 def apply_mattress(
     hass: HomeAssistant, entry: ConfigEntry, mode: str | None = None, max_diff: float | None = None
 ) -> None:

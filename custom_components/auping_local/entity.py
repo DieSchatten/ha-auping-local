@@ -42,7 +42,7 @@ class AupingEntity(Entity):
 
     @callback
     def _on_controller_update(self) -> None:
-        key = (self.available, self._state_key())
+        key = (self.available, tuple(self._data.names.values()), self._state_key())
         now = time.monotonic()
         if key != self._last_key or (self._is_changing() and now - self._last_write >= WRITE_INTERVAL_S):
             self._last_key = key

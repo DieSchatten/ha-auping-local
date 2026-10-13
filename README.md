@@ -23,8 +23,9 @@ andere (Totweg), fahren beide Seiten trotzdem im Gleichschritt und kommen auf de
 - **Matratzenmodus**: Bei *einer durchgehenden Matratze* darf eine Seite allein höchstens einen
   einstellbaren Abstand (Standard 10 % des Verstellwegs) von der anderen haben – hält man länger, bleibt
   der Motor an der Grenze stehen. Bei *zwei Einzelmatratzen* sind die Seiten frei verstellbar.
-- **Kalibrier-Assistent** ohne Stoppuhr: kurze Testfahrt ab der Endlage, du sagst „links höher“,
-  „rechts höher“ oder „gleich hoch“ – der Startversatz wird schrittweise eingegrenzt.
+- **Nachjustieren** statt Stoppuhr: aus einer Lage, in der beide Seiten gleich hoch stehen (z. B. flach),
+  mit „Beide“ ein Stück fahren, die zurückliegende Seite einzeln nachfahren, „Passt jetzt“ – daraus
+  berechnet die Integration den Startversatz. Jederzeit wiederholbar, wird mit jeder Runde genauer.
 - **Entitäten für Automationen**: je Motor eine Abdeckung (`cover`) pro Seite und eine für beide Seiten
   synchron, mit Position in Prozent; Tasten (`button`) für Flach, Referenzfahrt, Stopp und je Favorit;
   Auswahl `Favorit` (zeigt den gerade eingestellten Favoriten) und `Matratze`; Kalibrierwerte und
@@ -62,13 +63,18 @@ der Integration anpassen.
 ## Erste Schritte nach der Einrichtung
 
 1. **Gleichzeitig oder nacheinander?** Bedienfeld → Einstellungen → „Test starten“. Beide Seiten bekommen
-   kurz nacheinander je einen eigenen Befehl. Laufen beide los, bleibt „Gleichzeitig“ eingestellt.
-   Stoppt eine Seite, sobald die andere startet, „Nacheinander“ wählen.
-2. **Referenzfahrt** (Fernbedienung → Referenzfahrt). Danach kennt die Integration die Lage.
-3. **Kalibrieren** – je Motor, den du synchron fahren willst:
-   1. *Startversatz hoch abgleichen* und *runter abgleichen* (je 3–8 Runden).
-   2. Optional *Laufzeit messen*, damit die Prozentanzeige stimmt (Tippen, wenn der Motor am Endschalter
-      stehen bleibt).
+   kurz nacheinander je einen eigenen Befehl. Laufen beide los, bleibt „Gleichzeitig“ eingestellt (bei der
+   Auping-Connect-Box ist das der Normalfall). Stoppt eine Seite, sobald die andere startet, „Nacheinander“.
+2. **Laufzeit messen** (Kalibrieren → „Hochfahrt messen“): einmal von ganz unten nach ganz oben, tippen, wenn
+   der Motor am Anschlag stehen bleibt. Ohne Messung nimmt die Integration 25 s für den ganzen Weg an –
+   dann stimmen die Prozentwerte nur ungefähr, und bei deutlich längeren Motoren erreicht „Alles flach“
+   den Anschlag eventuell nicht ganz.
+3. **Startversatz nachjustieren** – je Motor und Richtung:
+   1. „Alles flach“ (für die Richtung *runter*: beide ganz hoch fahren).
+   2. Mit „Beide“ ein Stück hoch (bzw. runter) fahren.
+   3. Beim Motor auf „Nachjustieren“ tippen, die zurückliegende Seite mit ihren eigenen Tasten nachfahren,
+      bis beide gleich hoch sind, „Passt jetzt“.
+   Zum Prüfen gibt es unter *Kalibrieren* eine Testfahrt und Knöpfe für Feinkorrekturen in 0,1-s-Schritten.
 
 ## Wie der Ausgleich funktioniert
 

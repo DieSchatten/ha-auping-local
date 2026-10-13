@@ -21,9 +21,8 @@ KEYS = {
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     ctl = entry.runtime_data.controller
-    names = entry.runtime_data.names
     entities: list[NumberEntity] = [
-        AupingCalibrationNumber(entry, side, motor, key, names[side])
+        AupingCalibrationNumber(entry, side, motor, key)
         for side in ctl.sides
         for motor in ctl.motors
         for key in KEYS
@@ -39,16 +38,20 @@ class AupingCalibrationNumber(AupingEntity, NumberEntity):
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_native_step = 0.01
 
-    def __init__(self, entry, side: str, motor: str, key: str, side_name: str) -> None:
+    def __init__(self, entry, side: str, motor: str, key: str) -> None:
         super().__init__(entry, f"calib_{side}_{motor}_{key}")
         label, lo, hi = KEYS[key]
         self._side, self._motor, self._key = side, motor, key
-        self._attr_name = f"{label} {MOTOR_NAMES[motor]} {side_name}"
+        self._label = label
         self._attr_native_min_value = lo / 1000
         self._attr_native_max_value = hi / 1000
         self._attr_icon = "mdi:timer-cog-outline" if key.startswith("lag") else "mdi:timer-outline"
         # Laufzeiten sind nur für die Prozentanzeige wichtig – standardmäßig ausgeblendet.
         self._attr_entity_registry_enabled_default = key.startswith("lag")
+
+    @property
+    def name(self) -> str:
+        return f"{self._label} {MOTOR_NAMES[self._motor]} {self._data.names[self._side]}"
 
     def _state_key(self) -> object:
         return self.native_value
