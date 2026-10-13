@@ -2,6 +2,14 @@
 // Reines Web-Component ohne externe Bibliotheken; Farben kommen aus dem HA-Theme.
 
 const DOMAIN = "auping_local";
+// Kennung dieser geladenen Fassung (?v=… aus der Modul-Adresse, ändert sich mit jedem Update).
+const OWN_VERSION = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get("v");
+  } catch (e) {
+    return null;
+  }
+})();
 const TABS = [
   ["remote", "Fernbedienung"],
   ["calib", "Kalibrieren"],
@@ -56,6 +64,7 @@ class AupingPanel extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._checkStale();
     if (this._menu) this._menu.hass = hass;
     if (!this._started) {
       this._started = true;
@@ -68,7 +77,41 @@ class AupingPanel extends HTMLElement {
     if (this._menu) this._menu.narrow = narrow;
   }
 
-  set panel(_p) {}
+  set panel(p) {
+    this._panel = p;
+    this._checkStale();
+  }
+
+  /** Läuft noch eine ältere Fassung, als Home Assistant gerade anbietet (z. B. nach einem
+   *  Update ohne Neuladen der App)? Dann einmal selbst neu laden, sonst Hinweis zeigen. */
+  _checkStale() {
+    if (!OWN_VERSION || this._stale) return;
+    const url =
+      this._panel?.config?._panel_custom?.module_url ||
+      this._hass?.panels?.["auping-bett"]?.config?._panel_custom?.module_url;
+    if (!url) return;
+    let current = null;
+    try {
+      current = new URL(url, location.origin).searchParams.get("v");
+    } catch (e) {
+      return;
+    }
+    if (!current || current === OWN_VERSION) return;
+    this._stale = true;
+    let tried = null;
+    try {
+      tried = sessionStorage.getItem(`auping.reload.${current}`);
+      sessionStorage.setItem(`auping.reload.${current}`, "1");
+    } catch (e) {
+      tried = "1";
+    }
+    if (!tried) {
+      location.reload();
+      return;
+    }
+    const banner = this.shadowRoot.getElementById("stale");
+    if (banner) banner.hidden = false;
+  }
 
   disconnectedCallback() {
     this._unsubscribe();
@@ -144,9 +187,13 @@ class AupingPanel extends HTMLElement {
       <nav class="tabs">${TABS.map(
         ([k, label]) => `<button class="tab" data-tab="${k}">${label}</button>`
       ).join("")}</nav>
+      <div class="notice warn stale" id="stale" hidden>Das Bedienfeld wurde aktualisiert.
+        <button class="btn small-btn" id="reload">Neu laden</button></div>
       <main id="content"></main>
       <div class="toast" role="status"></div>`;
     this._content = this.shadowRoot.getElementById("content");
+    this.shadowRoot.getElementById("reload").addEventListener("click", () => location.reload());
+    if (this._stale) this.shadowRoot.getElementById("stale").hidden = false;
     this._status = this.shadowRoot.getElementById("status");
     try {
       this._menu = document.createElement("ha-menu-button");
@@ -847,6 +894,8 @@ p { margin: 6px 0 10px; line-height: 1.45; }
 .opt { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 6px; }
 .notice { border-radius: var(--radius); padding: 10px 14px; font-size: 14px; }
 .notice.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.notice.stale { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 1068px; margin: 12px auto 0; }
+.notice.stale[hidden] { display: none; }
 .segmented { display: flex; background: var(--card); border-radius: 999px; padding: 4px; gap: 4px; box-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0,0,0,.12)); }
 .seg {
   flex: 1; border: none; border-radius: 999px; padding: 10px 6px; font: inherit; font-weight: 500;
