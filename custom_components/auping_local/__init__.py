@@ -27,6 +27,8 @@ from .api import AupingAuthError, AupingConnectApi, AupingError
 from .const import (
     CONF_HOST,
     CONF_MAC,
+    CONF_MATTRESS,
+    CONF_MAX_DIFF,
     CONF_MODE,
     CONF_MOTORS,
     CONF_NAME_A,
@@ -34,9 +36,10 @@ from .const import (
     CONF_REMOTE,
     CONF_SIDES,
     CONF_XKEY,
+    DEFAULT_MAX_DIFF,
     DOMAIN,
     DOWN,
-    FAVORITE_SLOTS,
+    MATTRESS_DUAL,
     MODE_PARALLEL,
     MOTOR_NAMES,
     REMOTE_REGULAR,
@@ -49,7 +52,14 @@ from .controller import BedController
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.COVER, Platform.BUTTON, Platform.NUMBER, Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [
+    Platform.COVER,
+    Platform.BUTTON,
+    Platform.SELECT,
+    Platform.NUMBER,
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -74,7 +84,24 @@ def entry_settings(entry: ConfigEntry) -> dict[str, Any]:
         CONF_MODE: merged.get(CONF_MODE, MODE_PARALLEL),
         CONF_NAME_A: merged.get(CONF_NAME_A, "Links"),
         CONF_NAME_B: merged.get(CONF_NAME_B, "Rechts"),
+        CONF_MATTRESS: merged.get(CONF_MATTRESS, MATTRESS_DUAL),
+        CONF_MAX_DIFF: merged.get(CONF_MAX_DIFF, DEFAULT_MAX_DIFF),
     }
+
+
+def apply_mattress(
+    hass: HomeAssistant, entry: ConfigEntry, mode: str | None = None, max_diff: float | None = None
+) -> None:
+    """Matratzenmodus sofort übernehmen und in den Optionen merken (ohne Neuladen)."""
+    ctl = entry.runtime_data.controller
+    options = dict(entry.options)
+    if mode is not None:
+        ctl.mattress = options[CONF_MATTRESS] = mode
+    if max_diff is not None:
+        options[CONF_MAX_DIFF] = max(1, min(50, round(max_diff)))
+        ctl.max_diff = options[CONF_MAX_DIFF] / 100
+    hass.config_entries.async_update_entry(entry, options=options)
+    ctl._notify()  # noqa: SLF001
 
 
 def read_version() -> dict[str, Any]:
@@ -105,7 +132,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: AupingConfigEntry) -> bo
         entry.data[CONF_XKEY],
         entry.data.get(CONF_REMOTE, REMOTE_REGULAR),
     )
-    controller = BedController(api, settings[CONF_SIDES], settings[CONF_MOTORS], settings[CONF_MODE])
+    controller = BedController(
+        api,
+        settings[CONF_SIDES],
+        settings[CONF_MOTORS],
+        settings[CONF_MODE],
+        mattress=settings[CONF_MATTRESS],
+        max_diff=settings[CONF_MAX_DIFF] / 100,
+    )
     store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
     controller.import_state(await store.async_load())
     controller.set_save_callback(lambda: store.async_delay_save(controller.export_state, 2.0))
@@ -228,14 +262,24 @@ def _register_services(hass: HomeAssistant) -> None:
 
     async def goto_favorite(call: ServiceCall) -> None:
         ctl = get_entry(hass, call.data.get("config_entry_id")).runtime_data.controller
-        if not await ctl.goto_favorite(str(call.data["slot"])):
-            raise ServiceValidationError(f"Favorit {call.data['slot']} ist noch nicht gespeichert")
+        if not await ctl.goto_favorite(call.data["favorite"], resolve_sides(ctl, call.data["side"])):
+            raise ServiceValidationError(f"Favorit „{call.data['favorite']}“ gibt es nicht")
 
     async def save_favorite(call: ServiceCall) -> None:
+        """Aktuelle Lage unter diesem Namen speichern (vorhandener Favorit wird überschrieben)."""
         ctl = get_entry(hass, call.data.get("config_entry_id")).runtime_data.controller
-        ctl.save_favorite(str(call.data["slot"]))
+        try:
+            ctl.save_favorite(call.data["name"], ctl.find_favorite(call.data["name"]))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
 
-    slot = vol.All(vol.Coerce(int), vol.Range(min=1, max=FAVORITE_SLOTS))
+    async def delete_favorite(call: ServiceCall) -> None:
+        ctl = get_entry(hass, call.data.get("config_entry_id")).runtime_data.controller
+        fav_id = ctl.find_favorite(call.data["favorite"])
+        if fav_id is None:
+            raise ServiceValidationError(f"Favorit „{call.data['favorite']}“ gibt es nicht")
+        ctl.delete_favorite(fav_id)
+
     hass.services.async_register(
         DOMAIN,
         "move_to",
@@ -266,8 +310,23 @@ def _register_services(hass: HomeAssistant) -> None:
     for name in ("stop", "flat", "home"):
         hass.services.async_register(DOMAIN, name, simple, vol.Schema({ENTRY_FIELD: cv.string}))
     hass.services.async_register(
-        DOMAIN, "goto_favorite", goto_favorite, vol.Schema({ENTRY_FIELD: cv.string, vol.Required("slot"): slot})
+        DOMAIN,
+        "goto_favorite",
+        goto_favorite,
+        vol.Schema(
+            {
+                ENTRY_FIELD: cv.string,
+                vol.Required("favorite"): cv.string,
+                vol.Optional("side", default="both"): vol.In(SIDE_CHOICES),
+            }
+        ),
     )
     hass.services.async_register(
-        DOMAIN, "save_favorite", save_favorite, vol.Schema({ENTRY_FIELD: cv.string, vol.Required("slot"): slot})
+        DOMAIN, "save_favorite", save_favorite, vol.Schema({ENTRY_FIELD: cv.string, vol.Required("name"): cv.string})
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "delete_favorite",
+        delete_favorite,
+        vol.Schema({ENTRY_FIELD: cv.string, vol.Required("favorite"): cv.string}),
     )

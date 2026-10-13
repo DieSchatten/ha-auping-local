@@ -22,13 +22,17 @@
           "sides_count": "Bettseiten",
           "name_a": "Name Seite A",
           "name_b": "Name Seite B",
-          "mode": "Ansteuerung beider Seiten"
+          "mode": "Ansteuerung beider Seiten",
+          "mattress": "Matratze",
+          "max_diff": "Max. Höhenunterschied der Seiten"
         },
         "data_description": {
           "motors": "Welche Teile sich bei dir verstellen lassen.",
           "name_a": "Steuereinheit A (in der Auping-App die linke Seite).",
           "name_b": "Steuereinheit B (in der Auping-App die rechte Seite).",
-          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen."
+          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen.",
+          "mattress": "Bei einer durchgehenden Matratze darf eine Seite allein nur begrenzt von der anderen abweichen.",
+          "max_diff": "In Prozent des Verstellwegs. Gilt nur bei einer durchgehenden Matratze."
         }
       },
       "reauth_confirm": {
@@ -62,13 +66,17 @@
           "sides_count": "Bettseiten",
           "name_a": "Name Seite A",
           "name_b": "Name Seite B",
-          "mode": "Ansteuerung beider Seiten"
+          "mode": "Ansteuerung beider Seiten",
+          "mattress": "Matratze",
+          "max_diff": "Max. Höhenunterschied der Seiten"
         },
         "data_description": {
           "motors": "Welche Teile sich bei dir verstellen lassen.",
           "name_a": "Steuereinheit A (in der Auping-App die linke Seite).",
           "name_b": "Steuereinheit B (in der Auping-App die rechte Seite).",
-          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen."
+          "mode": "„Gleichzeitig“ ist richtig, wenn beim Test im Bedienfeld beide Seiten zusammen loslaufen.",
+          "mattress": "Bei einer durchgehenden Matratze darf eine Seite allein nur begrenzt von der anderen abweichen.",
+          "max_diff": "In Prozent des Verstellwegs. Gilt nur bei einer durchgehenden Matratze."
         }
       }
     },
@@ -181,29 +189,47 @@
     },
     "goto_favorite": {
       "name": "Favorit anfahren",
-      "description": "Fährt eine gespeicherte Lage synchron an.",
+      "description": "Fährt einen gespeicherten Favoriten an – jeder Motor gezielt hoch oder runter, ausgehend von der aktuellen Lage.",
       "fields": {
         "config_entry_id": {
           "name": "Bett",
           "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
         },
-        "slot": {
+        "favorite": {
           "name": "Favorit",
-          "description": "Speicherplatz 1 bis 3."
+          "description": "Name des Favoriten."
+        },
+        "side": {
+          "name": "Seite",
+          "description": "Beide oder nur eine Seite."
         }
       }
     },
     "save_favorite": {
       "name": "Favorit speichern",
-      "description": "Speichert die aktuelle Lage beider Seiten.",
+      "description": "Speichert die aktuelle Lage beider Seiten unter diesem Namen (ein vorhandener Favorit mit dem Namen wird überschrieben).",
       "fields": {
         "config_entry_id": {
           "name": "Bett",
           "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
         },
-        "slot": {
+        "name": {
+          "name": "Name",
+          "description": "Zum Beispiel „Lesen“."
+        }
+      }
+    },
+    "delete_favorite": {
+      "name": "Favorit löschen",
+      "description": "Löscht einen Favoriten.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bett",
+          "description": "Nur nötig, wenn mehrere Betten eingerichtet sind."
+        },
+        "favorite": {
           "name": "Favorit",
-          "description": "Speicherplatz 1 bis 3."
+          "description": "Name des Favoriten."
         }
       }
     }

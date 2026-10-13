@@ -19,6 +19,9 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -32,6 +35,8 @@ from .const import (
     ALL_MOTORS,
     CONF_HOST,
     CONF_MAC,
+    CONF_MATTRESS,
+    CONF_MAX_DIFF,
     CONF_MODE,
     CONF_MOTORS,
     CONF_NAME_A,
@@ -39,7 +44,10 @@ from .const import (
     CONF_REMOTE,
     CONF_SIDES,
     CONF_XKEY,
+    DEFAULT_MAX_DIFF,
     DOMAIN,
+    MATTRESS_DUAL,
+    MATTRESS_SINGLE,
     MODE_PARALLEL,
     MODE_SEQUENTIAL,
     MOTOR_HEAD,
@@ -87,6 +95,20 @@ def _bed_schema(defaults: dict[str, Any]) -> vol.Schema:
                     mode=SelectSelectorMode.LIST,
                 )
             ),
+            vol.Required(CONF_MATTRESS, default=defaults[CONF_MATTRESS]): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=MATTRESS_SINGLE, label="Eine durchgehende Matratze (Seiten begrenzt verstellbar)"
+                        ),
+                        SelectOptionDict(value=MATTRESS_DUAL, label="Zwei Einzelmatratzen (Seiten frei verstellbar)"),
+                    ],
+                    mode=SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Required(CONF_MAX_DIFF, default=defaults[CONF_MAX_DIFF]): NumberSelector(
+                NumberSelectorConfig(min=1, max=50, step=1, unit_of_measurement="%", mode=NumberSelectorMode.SLIDER)
+            ),
             vol.Required(CONF_NAME_A, default=defaults[CONF_NAME_A]): TextSelector(),
             vol.Required(CONF_NAME_B, default=defaults[CONF_NAME_B]): TextSelector(),
             vol.Required(CONF_MODE, default=defaults[CONF_MODE]): SelectSelector(
@@ -113,6 +135,8 @@ def _bed_options(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_NAME_A: user_input[CONF_NAME_A].strip() or "Links",
         CONF_NAME_B: user_input[CONF_NAME_B].strip() or "Rechts",
         CONF_MODE: user_input[CONF_MODE],
+        CONF_MATTRESS: user_input[CONF_MATTRESS],
+        CONF_MAX_DIFF: int(user_input[CONF_MAX_DIFF]),
     }
 
 
@@ -207,6 +231,9 @@ class AupingConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_NAME_A: "Links",
             CONF_NAME_B: "Rechts",
             CONF_MODE: MODE_PARALLEL,
+            # Die Box kennt "eine Matratze, zwei Steuereinheiten" als sync = 1.
+            CONF_MATTRESS: MATTRESS_SINGLE if self._config.get("sync") == 1 else MATTRESS_DUAL,
+            CONF_MAX_DIFF: DEFAULT_MAX_DIFF,
         }
         return self.async_show_form(
             step_id="bed",
@@ -267,6 +294,8 @@ class AupingOptionsFlow(OptionsFlowWithReload):
             CONF_NAME_A: merged.get(CONF_NAME_A, "Links"),
             CONF_NAME_B: merged.get(CONF_NAME_B, "Rechts"),
             CONF_MODE: merged.get(CONF_MODE, MODE_PARALLEL),
+            CONF_MATTRESS: merged.get(CONF_MATTRESS, MATTRESS_DUAL),
+            CONF_MAX_DIFF: merged.get(CONF_MAX_DIFF, DEFAULT_MAX_DIFF),
         }
         schema = vol.Schema(
             {vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str, **_bed_schema(defaults).schema}

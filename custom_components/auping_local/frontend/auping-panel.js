@@ -28,6 +28,12 @@ const ICON = {
   up: '<svg viewBox="0 0 24 24"><path d="M7.4 15.4 12 10.8l4.6 4.6L18 14l-6-6-6 6z"/></svg>',
   down: '<svg viewBox="0 0 24 24"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg>',
   star: '<svg viewBox="0 0 24 24"><path d="M12 17.3 18.2 21l-1.6-7L22 9.2l-7.2-.6L12 2 9.2 8.6 2 9.2 7.4 14l-1.6 7z"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
+  edit: '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>',
+  save: '<svg viewBox="0 0 24 24"><path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10z"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z"/></svg>',
+  left: '<svg viewBox="0 0 24 24"><path d="M15.4 7.4 14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg>',
+  right: '<svg viewBox="0 0 24 24"><path d="M8.6 16.6 10 18l6-6-6-6-1.4 1.4 4.6 4.6z"/></svg>',
 };
 
 class AupingPanel extends HTMLElement {
@@ -44,6 +50,8 @@ class AupingPanel extends HTMLElement {
     this._structure = null;
     this._unsub = null;
     this._toast = null;
+    this._favEdit = false;
+    this._lastLimit = null;
   }
 
   set hass(hass) {
@@ -187,8 +195,8 @@ class AupingPanel extends HTMLElement {
       d.mode,
       m && [m.motor, m.direction, m.phase, Object.keys(m.marks)],
       o && [o.motor, o.direction, o.phase, o.rounds],
-      this._tab === "settings" ? [d.box, d.version, d.host] : null,
-      this._tab === "remote" ? Object.values(d.favorites).map((f) => !!f) : null,
+      this._tab === "settings" ? [d.box, d.version, d.host, d.mattress, d.max_diff] : null,
+      this._tab === "remote" ? [d.favorites.map((f) => [f.id, f.name]), this._favEdit, d.mattress, d.max_diff] : null,
     ]);
   }
 
@@ -261,26 +269,62 @@ class AupingPanel extends HTMLElement {
       </section>`
       )
       .join("");
-    const favs = Object.entries(d.favorites)
-      .map(
-        ([slot, fav]) => `<div class="fav">
-          <button class="btn fav-go" data-fav="${slot}" ${fav ? "" : "disabled"}>${ICON.star}<span>Favorit ${slot}</span></button>
-          <button class="link" data-favsave="${slot}">speichern</button></div>`
-      )
-      .join("");
+    const mattressHint =
+      d.sides.length === 2 && d.mattress === "single"
+        ? ` Eine Matratze: Die Seiten dürfen höchstens ${Math.round(d.max_diff * 100)} % auseinander.`
+        : "";
     return `
       <div class="notice warn" id="unknown" hidden>Position noch unbekannt – einmal <b>Referenzfahrt</b> machen, dann stimmen Prozentwerte und Sync.</div>
       ${seg}
       <div class="hint">Taste gedrückt halten zum Fahren. ${
         this._side === "both" ? "Beide Seiten fahren mit Ausgleich im Gleichschritt." : `Nur ${esc(this._sideName(this._side))}.`
-      }</div>
+      }${mattressHint}</div>
       <div class="grid">${motors}</div>
       <section class="card actions">
         <button class="btn danger big" data-act="stop_all">Stopp</button>
         <button class="btn" data-act="flat">Alles flach</button>
         <button class="btn" data-act="home">Referenzfahrt</button>
       </section>
-      <section class="card favs"><h2>Favoriten</h2><div class="fav-row">${favs}</div></section>`;
+      ${this._favoritesHtml()}`;
+  }
+
+  _favoritesHtml() {
+    const d = this._data;
+    const favs = d.favorites;
+    let body;
+    if (!favs.length) {
+      body = `<p class="small">Noch keine Favoriten. Bring das Bett in die gewünschte Lage und tippe auf <b>Speichern</b>.</p>`;
+    } else if (this._favEdit) {
+      body = `<div class="fav-edit">${favs
+        .map(
+          (f, i) => `<div class="fav-line">
+            <span class="fav-name">${ICON.star}${esc(f.name)}</span>
+            <button class="icon-btn" data-favmove="${f.id}:-1" ${i === 0 ? "disabled" : ""} title="Nach vorne" aria-label="Nach vorne">${ICON.left}</button>
+            <button class="icon-btn" data-favmove="${f.id}:1" ${i === favs.length - 1 ? "disabled" : ""} title="Nach hinten" aria-label="Nach hinten">${ICON.right}</button>
+            <button class="icon-btn" data-favrename="${f.id}" title="Umbenennen" aria-label="Umbenennen">${ICON.edit}</button>
+            <button class="icon-btn" data-favover="${f.id}" title="Mit aktueller Lage überschreiben" aria-label="Überschreiben">${ICON.save}</button>
+            <button class="icon-btn danger" data-favdel="${f.id}" title="Löschen" aria-label="Löschen">${ICON.trash}</button>
+          </div>`
+        )
+        .join("")}</div>`;
+    } else {
+      body = `<div class="fav-row">${favs
+        .map((f) => `<button class="btn fav-go" data-fav="${f.id}">${ICON.star}<span>${esc(f.name)}</span></button>`)
+        .join("")}</div>`;
+    }
+    const sideNote =
+      this._side !== "both" && favs.length && !this._favEdit
+        ? `<p class="small">Fährt nur ${esc(this._sideName(this._side))} in die gespeicherte Lage.</p>`
+        : "";
+    return `<section class="card favs">
+        <div class="card-head"><h2>Favoriten</h2>
+          <div class="head-actions">
+            ${favs.length ? `<button class="link" data-favedit>${this._favEdit ? "Fertig" : "Bearbeiten"}</button>` : ""}
+            <button class="btn small-btn" data-favnew>${ICON.plus}Speichern</button>
+          </div>
+        </div>
+        ${body}${sideNote}
+      </section>`;
   }
 
   // ------------------------------------------------------------------ Kalibrieren
@@ -434,6 +478,26 @@ class AupingPanel extends HTMLElement {
       </section>`
           : ""
       }
+      ${
+        two
+          ? `<section class="card">
+        <h2>Matratze</h2>
+        <div class="row radio col">
+          <label><input type="radio" name="mattress" value="single" ${d.mattress === "single" ? "checked" : ""}>
+            Eine durchgehende Matratze – eine Seite allein darf nur begrenzt abweichen</label>
+          <label><input type="radio" name="mattress" value="dual" ${d.mattress === "dual" ? "checked" : ""}>
+            Zwei Einzelmatratzen – Seiten frei verstellbar</label>
+        </div>
+        <div class="row slider ${d.mattress === "single" ? "" : "hidden"}">
+          <span>Max. Unterschied</span>
+          <input type="range" min="1" max="50" step="1" value="${Math.round(d.max_diff * 100)}" data-maxdiff>
+          <b data-maxdiffval>${Math.round(d.max_diff * 100)} %</b>
+        </div>
+        <p class="small">In Prozent des Verstellwegs. „Beide“ fährt immer synchron; die Grenze greift, wenn nur eine Seite fährt
+        oder ein Favorit die Seiten unterschiedlich hoch stellen würde.</p>
+      </section>`
+          : ""
+      }
       <section class="card">
         <h2>Positionen</h2>
         <p>Nach Benutzung der Funk-Fernbedienung weiß die Integration nicht, wo das Bett steht. Dann einmal <b>Referenzfahrt</b> machen –
@@ -474,16 +538,67 @@ class AupingPanel extends HTMLElement {
     );
     root.querySelectorAll(".holdbtn").forEach((btn) => this._bindHold(btn));
     root.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => this._cmd(b.dataset.act)));
+    const favName = (id) => (d.favorites.find((f) => f.id === id) || {}).name || "";
     root.querySelectorAll("[data-fav]").forEach((b) =>
-      b.addEventListener("click", () => this._cmd("goto_favorite", { slot: b.dataset.fav }))
+      b.addEventListener("click", () => this._cmd("goto_favorite", { id: b.dataset.fav, side: this._side }))
     );
-    root.querySelectorAll("[data-favsave]").forEach((b) =>
+    root.querySelectorAll("[data-favnew]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm(`Aktuelle Lage als Favorit ${b.dataset.favsave} speichern?`)) return;
-        await this._cmd("save_favorite", { slot: b.dataset.favsave });
-        this._showToast(`Favorit ${b.dataset.favsave} gespeichert`);
+        const name = await this._dialog({
+          title: "Aktuelle Lage speichern",
+          text: "Gespeichert wird die Lage beider Seiten.",
+          input: `Favorit ${d.favorites.length + 1}`,
+          confirm: "Speichern",
+        });
+        if (name == null) return;
+        if ((await this._cmd("save_favorite", { name })) != null) this._showToast(`„${name.trim()}“ gespeichert`);
       })
     );
+    root.querySelectorAll("[data-favedit]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._favEdit = !this._favEdit;
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-favmove]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const [id, offset] = b.dataset.favmove.split(":");
+        this._cmd("move_favorite", { id, offset: Number(offset) });
+      })
+    );
+    root.querySelectorAll("[data-favrename]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const id = b.dataset.favrename;
+        const name = await this._dialog({ title: "Umbenennen", input: favName(id), confirm: "Übernehmen" });
+        if (name != null) this._cmd("rename_favorite", { id, name });
+      })
+    );
+    root.querySelectorAll("[data-favover]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const id = b.dataset.favover;
+        const ok = await this._dialog({
+          title: `„${favName(id)}“ überschreiben?`,
+          text: "Der Favorit bekommt die aktuelle Lage beider Seiten.",
+          confirm: "Überschreiben",
+        });
+        if (ok && (await this._cmd("save_favorite", { id })) != null) this._showToast("Überschrieben");
+      })
+    );
+    root.querySelectorAll("[data-favdel]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const id = b.dataset.favdel;
+        const ok = await this._dialog({ title: `„${favName(id)}“ löschen?`, confirm: "Löschen", danger: true });
+        if (ok) await this._cmd("delete_favorite", { id });
+      })
+    );
+    root.querySelectorAll('input[name="mattress"]').forEach((r) =>
+      r.addEventListener("change", () => this._cmd("set_mattress", { mode: r.value }))
+    );
+    root.querySelectorAll("[data-maxdiff]").forEach((r) => {
+      const label = root.querySelector("[data-maxdiffval]");
+      r.addEventListener("input", () => (label.textContent = `${r.value} %`));
+      r.addEventListener("change", () => this._cmd("set_mattress", { max_diff: Number(r.value) }));
+    });
     root.querySelectorAll("[data-cmotor]").forEach((b) =>
       b.addEventListener("click", () => {
         this._calibMotor = b.dataset.cmotor;
@@ -536,7 +651,12 @@ class AupingPanel extends HTMLElement {
     );
     root.querySelectorAll("[data-markflat]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm("Steht das Bett wirklich auf beiden Seiten ganz flach?")) return;
+        const ok = await this._dialog({
+          title: "Alles als ganz unten markieren?",
+          text: "Nur wenn das Bett wirklich auf beiden Seiten ganz flach steht.",
+          confirm: "Markieren",
+        });
+        if (!ok) return;
         for (const s of d.sides) for (const m of d.motors) await this._cmd("set_position", { side: s, motor: m, position: 0 });
         this._showToast("Positionen auf 0 gesetzt");
       })
@@ -575,6 +695,49 @@ class AupingPanel extends HTMLElement {
     });
     btn.addEventListener("keyup", (e) => {
       if (e.key === " " || e.key === "Enter") end();
+    });
+  }
+
+  // ------------------------------------------------------------------ Dialog
+
+  /** Eigener Dialog (statt confirm/prompt, die in der HA-App nicht zuverlässig gehen).
+   *  Mit ``input`` liefert er den Text, sonst true – bei Abbruch null. */
+  _dialog({ title, text = "", input = null, confirm = "OK", danger = false }) {
+    if (this.shadowRoot.querySelector(".dialog-wrap")) return Promise.resolve(null);  // nie zwei auf einmal
+    return new Promise((resolve) => {
+      const wrap = document.createElement("div");
+      wrap.className = "dialog-wrap";
+      wrap.innerHTML = `<div class="dialog" role="dialog" aria-modal="true">
+          <h2>${esc(title)}</h2>
+          ${text ? `<p>${esc(text)}</p>` : ""}
+          ${input != null ? `<input class="dialog-input" type="text" maxlength="40" value="${esc(input)}">` : ""}
+          <div class="dialog-actions">
+            <button class="link" data-x="cancel">Abbrechen</button>
+            <button class="btn ${danger ? "danger" : "primary"}" data-x="ok">${esc(confirm)}</button>
+          </div></div>`;
+      this.shadowRoot.appendChild(wrap);
+      const field = wrap.querySelector(".dialog-input");
+      const done = (value) => {
+        wrap.remove();
+        resolve(value);
+      };
+      const ok = () => {
+        if (field) {
+          if (!field.value.trim()) return field.focus();
+          done(field.value.trim());
+        } else done(true);
+      };
+      wrap.querySelector('[data-x="cancel"]').addEventListener("click", () => done(null));
+      wrap.querySelector('[data-x="ok"]').addEventListener("click", ok);
+      wrap.addEventListener("click", (e) => e.target === wrap && done(null));
+      wrap.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") done(null);
+        if (e.key === "Enter") ok();
+      });
+      if (field) {
+        field.focus();
+        field.select();
+      } else wrap.querySelector('[data-x="ok"]').focus();
     });
   }
 
@@ -626,6 +789,9 @@ class AupingPanel extends HTMLElement {
         el.classList.toggle("done", mark != null);
       }
     }
+    root.querySelectorAll("[data-fav]").forEach((b) => b.classList.toggle("active", b.dataset.fav === d.active_favorite));
+    if (d.limit_hit && d.limit_hit !== this._lastLimit) this._showToast(d.limit_hit);
+    this._lastLimit = d.limit_hit;
     const rtt = root.querySelector("#rtt");
     if (rtt) rtt.textContent = d.rtt_ms == null ? "–" : `${d.rtt_ms} ms`;
   }
@@ -722,9 +888,37 @@ p { margin: 6px 0 10px; line-height: 1.45; }
 .btn.big { font-size: 17px; }
 .btn svg { width: 18px; height: 18px; fill: currentColor; }
 .link { border: none; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 6px; }
-.fav-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
-.fav { display: flex; flex-direction: column; align-items: stretch; }
-.fav .link { font-size: 12px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.card-head h2 { margin: 0; }
+.head-actions { display: flex; align-items: center; gap: 4px; }
+.small-btn { min-height: 36px; padding: 6px 12px; font-size: 14px; }
+.fav-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.fav-go { justify-content: flex-start; text-align: left; }
+.fav-go span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fav-go.active { background: color-mix(in srgb, var(--accent) 22%, var(--card)); box-shadow: inset 0 0 0 2px var(--accent); }
+.fav-go.active svg { fill: var(--accent); }
+.fav-edit { display: flex; flex-direction: column; gap: 4px; }
+.fav-line { display: flex; align-items: center; gap: 2px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.fav-line:last-child { border-bottom: none; }
+.fav-name { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fav-name svg { width: 18px; height: 18px; fill: var(--muted); flex: none; }
+.icon-btn { border: none; background: none; color: var(--primary-text-color); width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: grid; place-items: center; }
+.icon-btn:hover { background: color-mix(in srgb, var(--primary-text-color) 8%, transparent); }
+.icon-btn:disabled { opacity: .3; cursor: default; }
+.icon-btn svg { width: 20px; height: 20px; fill: currentColor; }
+.icon-btn.danger { color: var(--danger); }
+.row.col { flex-direction: column; align-items: flex-start; gap: 10px; }
+.row.radio.col label { margin: 0; align-items: flex-start; line-height: 1.35; }
+.row.radio.col input { margin-top: 3px; }
+.row.slider { gap: 12px; }
+.row.slider input { flex: 1; min-width: 120px; accent-color: var(--accent); }
+.row.slider b { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
+.dialog-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; z-index: 10; padding: 16px; }
+.dialog { background: var(--card); color: var(--primary-text-color); border-radius: 16px; padding: 18px 20px; width: min(420px, 100%); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+.dialog h2 { font-size: 18px; margin-bottom: 6px; }
+.dialog-input { width: 100%; padding: 10px 12px; font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--primary-background-color); color: var(--primary-text-color); margin: 8px 0 4px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .chips, .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .row { margin-top: 8px; }
 .row.three { display: grid; grid-template-columns: 1fr 1fr 1fr; }

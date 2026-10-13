@@ -17,6 +17,8 @@ import auping_local.controller as controller_mod
 from auping_local.api import AupingConnectApi, normalize_xkey, parse_share_code
 from auping_local.const import (
     DOWN,
+    MATTRESS_DUAL,
+    MATTRESS_SINGLE,
     MODE_PARALLEL,
     MODE_SEQUENTIAL,
     UP,
@@ -283,23 +285,185 @@ async def test_flat_and_home():
     await ctl.async_shutdown()
 
 
-async def test_favorites_roundtrip():
+async def test_favorites_drive_relative_to_current_position():
     ctl, sim = make()
-    await ctl.move_to({"a": {"back": 0.4}, "b": {"back": 0.7}})
+    await ctl.move_to({"a": {"back": 0.4, "legs": 0.3}, "b": {"back": 0.7, "legs": 0.3}})
     await settle(ctl, sim)
-    ctl.save_favorite("1")
-    await ctl.flat()
+    lesen = ctl.save_favorite("Lesen")
+    await ctl.move_to({"a": {"back": 0.2, "legs": 0.0}, "b": {"back": 0.2, "legs": 0.0}})
     await settle(ctl, sim)
-    assert await ctl.goto_favorite("1")
+    schlafen = ctl.save_favorite("Schlafen")
+    assert [f["name"] for f in ctl.snapshot()["favorites"]] == ["Lesen", "Schlafen"]
+    assert ctl.active_favorite() == schlafen
+
+    assert await ctl.goto_favorite("lesen")  # Name, Groß/klein egal
     await settle(ctl, sim)
     assert abs(sim.position("a", "back") - 0.4) < 0.03
     assert abs(sim.position("b", "back") - 0.7) < 0.03
-    assert not await ctl.goto_favorite("2")
+    assert ctl.active_favorite() == lesen
+
+    # Zweites Antippen: kein einziger Befehl an die Box
+    sent = len(sim.log)
+    assert await ctl.goto_favorite(lesen)
+    await settle(ctl, sim)
+    assert len(sim.log) == sent
+
+    # Vom höheren Favoriten zum niedrigeren: es geht abwärts, nicht "x nach oben"
+    assert await ctl.goto_favorite("Schlafen")
+    await asyncio.wait_for(ctl.wait_idle(), 5)
+    actions = {b["motor_2"]["Action"] for _, cbu, b in sim.log[sent:]}
+    assert actions == {2}
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.2) < 0.03
+    assert abs(sim.position("b", "back") - 0.2) < 0.03
+    assert not await ctl.goto_favorite("gibt es nicht")
+    await ctl.async_shutdown()
+
+
+async def test_favorite_for_one_side_only():
+    ctl, sim = make()
+    await ctl.move_to({"a": {"back": 0.5}, "b": {"back": 0.3}})
+    await settle(ctl, sim)
+    fav = ctl.save_favorite("Fernsehen")
+    await ctl.flat()
+    await settle(ctl, sim)
+    await ctl.goto_favorite(fav, sides=["a"])
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.5) < 0.03
+    assert sim.position("b", "back") == 0.0
+    await ctl.async_shutdown()
+
+
+def test_favorite_management():
+    ctl, _ = make()
+    first = ctl.save_favorite("Lesen")
+    second = ctl.save_favorite()
+    assert ctl.favorites[second]["name"] == f"Favorit {second}"
+    with pytest.raises(ValueError):
+        ctl.save_favorite("  lesen ")
+    with pytest.raises(ValueError):
+        ctl.rename_favorite(second, "")
+    ctl.rename_favorite(second, "Schlafen")
+    ctl.move_favorite(second, -1)
+    assert list(ctl.favorites) == [second, first]
+    ctl.save_favorite(fav_id=first)  # überschreiben behält den Namen
+    assert ctl.favorites[first]["name"] == "Lesen"
+    ctl.delete_favorite(first)
+    assert list(ctl.favorites) == [second]
+    third = ctl.save_favorite("Neu")
+    assert int(third) > int(second)
+    for i in range(20 - len(ctl.favorites)):
+        ctl.save_favorite(f"F{i}")
+    with pytest.raises(ValueError):
+        ctl.save_favorite("zu viel")
+
+
+def test_old_favorite_format_is_migrated():
+    ctl, _ = make()
+    ctl.import_state(
+        {"favorites": {"1": {"a": {"back": 0.4}, "b": {"back": 0.5}}, "2": None, "3": None}}
+    )
+    assert ctl.favorites == {
+        "1": {"name": "Favorit 1", "positions": {"a": {"back": 0.4}, "b": {"back": 0.5}}}
+    }
     data = ctl.export_state()
     ctl2, _ = make(calibrate_travel=False, calibrate_lag=False)
     ctl2.import_state(data)
+    assert ctl2.favorites == ctl.favorites
     assert ctl2.calibration == ctl.calibration
-    assert ctl2.favorites["1"] == ctl.favorites["1"]
+
+
+async def test_endpoint_not_driven_again():
+    """Steht ein Motor nachweislich am Endschalter, gibt es keinen weiteren Befehl."""
+    ctl, sim = make(start=0.5)
+    await ctl.flat()
+    await settle(ctl, sim)
+    sent = len(sim.log)
+    await ctl.flat()
+    await settle(ctl, sim)
+    assert len(sim.log) == sent
+    # Referenzfahrt fährt trotzdem bewusst runter
+    await ctl.home()
+    await asyncio.wait_for(ctl.wait_idle(), 5)
+    assert len(sim.log) > sent
+    await ctl.stop_all()
+    await settle(ctl, sim)
+    await ctl.async_shutdown()
+
+
+# --------------------------------------------------------------------------- Matratzenmodus
+
+
+def set_both(ctl, sim, motor, a, b):
+    for side, pos in (("a", a), ("b", b)):
+        ctl.state[side][motor].pos = pos
+        sim.motors[side][motor].pos = pos
+
+
+async def test_single_mattress_limits_one_side():
+    ctl, sim = make(start=0.3)
+    ctl.mattress, ctl.max_diff = MATTRESS_SINGLE, 0.10
+    await ctl.start_move(["a"], "back", UP)  # Taste lange halten
+    await asyncio.sleep(1.6)
+    await ctl.stop_motor(["a"], "back")
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.4) < 0.03
+    assert sim.position("b", "back") == pytest.approx(0.3)
+    assert ctl.snapshot()["limit_hit"]
+    await ctl.move_to({"a": {"back": 0.9}})
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.4) < 0.03
+    # Beide zusammen dürfen frei fahren
+    await ctl.move_to({"a": {"back": 0.8}, "b": {"back": 0.8}})
+    await settle(ctl, sim)
+    assert abs(sim.position("b", "back") - 0.8) < 0.03
+    await ctl.async_shutdown()
+
+
+async def test_single_mattress_never_reverses_and_allows_closing_gap():
+    ctl, sim = make()
+    ctl.mattress, ctl.max_diff = MATTRESS_SINGLE, 0.10
+    set_both(ctl, sim, "back", 0.6, 0.2)  # schon zu weit auseinander
+    sent = len(sim.log)
+    notes = []
+    ctl.add_listener(lambda: notes.append(ctl.snapshot()["limit_hit"]))
+    await ctl.start_move(["a"], "back", UP)  # würde den Abstand vergrößern
+    await settle(ctl, sim)
+    assert len(sim.log) == sent and sim.position("a", "back") == pytest.approx(0.6)
+    assert any(notes), "Begrenzung muss gemeldet werden, auch ohne Fahrt"
+    await ctl.start_move(["a"], "back", DOWN)  # Richtung B ist erlaubt, bis 10 % unter B
+    await asyncio.sleep(1.5)
+    await ctl.stop_motor(["a"], "back")
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.1) < 0.03
+    await ctl.async_shutdown()
+
+
+async def test_single_mattress_limits_favorites_and_timed_moves():
+    ctl, sim = make()
+    await ctl.move_to({"a": {"back": 0.7}, "b": {"back": 0.3}})
+    await settle(ctl, sim)
+    fav = ctl.save_favorite("Ungleich")
+    await ctl.flat()
+    await settle(ctl, sim)
+    ctl.mattress, ctl.max_diff = MATTRESS_SINGLE, 0.10
+    await ctl.goto_favorite(fav)
+    await settle(ctl, sim)
+    pa, pb = sim.position("a", "back"), sim.position("b", "back")
+    assert abs(pa - pb - 0.10) < 0.03 and abs((pa + pb) / 2 - 0.5) < 0.03
+    await ctl.nudge("b", "back", DOWN, 1500)  # Dienst "Fahren für Zeit"
+    await settle(ctl, sim)
+    assert pa - sim.position("b", "back") < 0.13
+    await ctl.async_shutdown()
+
+
+async def test_two_mattresses_are_free():
+    ctl, sim = make(start=0.3)
+    ctl.mattress = MATTRESS_DUAL
+    await ctl.move_to({"a": {"back": 0.8}})
+    await settle(ctl, sim)
+    assert abs(sim.position("a", "back") - 0.8) < 0.03
+    assert ctl.snapshot()["limit_hit"] is None
     await ctl.async_shutdown()
 
 

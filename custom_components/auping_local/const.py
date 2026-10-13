@@ -17,6 +17,12 @@ CONF_MOTORS = "motors"  # Liste von Motor-Schlüsseln, z. B. ["head", "back", "l
 CONF_NAME_A = "name_a"
 CONF_NAME_B = "name_b"
 CONF_MODE = "mode"  # "parallel" | "sequential"
+CONF_MATTRESS = "mattress"  # "single" | "dual"
+CONF_MAX_DIFF = "max_diff"  # erlaubter Höhenunterschied der Seiten in % (nur bei einer Matratze)
+
+MATTRESS_SINGLE = "single"  # eine durchgehende Matratze über beide Lattenroste
+MATTRESS_DUAL = "dual"  # zwei Einzelmatratzen, Seiten frei verfahrbar
+DEFAULT_MAX_DIFF = 10
 
 MODE_PARALLEL = "parallel"
 MODE_SEQUENTIAL = "sequential"
@@ -83,7 +89,7 @@ OVERRUN_FACTOR = 0.15
 OVERRUN_MIN_MS = 1500
 
 STORAGE_VERSION = 1
-FAVORITE_SLOTS = 3
+MAX_FAVORITES = 20
 
 PANEL_URL_PATH = "auping-bett"
 PANEL_STATIC_URL = "/auping_local_static"

@@ -10,7 +10,18 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 
-from .const import CONF_HOST, CONF_MODE, DOMAIN, DOWN, MODE_PARALLEL, MODE_SEQUENTIAL, MOTOR_NAMES, UP
+from .const import (
+    CONF_HOST,
+    CONF_MODE,
+    DOMAIN,
+    DOWN,
+    MATTRESS_DUAL,
+    MATTRESS_SINGLE,
+    MODE_PARALLEL,
+    MODE_SEQUENTIAL,
+    MOTOR_NAMES,
+    UP,
+)
 
 PUSH_INTERVAL_S = 0.2
 
@@ -142,9 +153,22 @@ async def ws_command(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         elif action == "stop_all":
             await ctl.stop_all()
         elif action == "goto_favorite":
-            result = await ctl.goto_favorite(str(d["slot"]))
+            result = await ctl.goto_favorite(str(d["id"]), _sides(ctl, d.get("side", "both")))
         elif action == "save_favorite":
-            ctl.save_favorite(str(d["slot"]))
+            result = ctl.save_favorite(d.get("name"), d.get("id"))
+        elif action == "rename_favorite":
+            ctl.rename_favorite(str(d["id"]), d["name"])
+        elif action == "delete_favorite":
+            ctl.delete_favorite(str(d["id"]))
+        elif action == "move_favorite":
+            ctl.move_favorite(str(d["id"]), int(d["offset"]))
+        elif action == "set_mattress":
+            from . import apply_mattress  # erst zur Laufzeit, sonst Kreisimport
+
+            mode = d.get("mode")
+            if mode is not None and mode not in (MATTRESS_SINGLE, MATTRESS_DUAL):
+                raise ValueError("unbekannter Matratzenmodus")
+            apply_mattress(hass, entry, mode=mode, max_diff=d.get("max_diff"))
         elif action == "nudge":
             await ctl.nudge(d["side"], d["motor"], _dir(d["direction"]), int(d["ms"]))
         elif action == "set_calibration":

@@ -30,12 +30,15 @@ from .const import (
     CBU_FOR_SIDE,
     DEFAULT_TRAVEL_MS,
     DOWN,
-    FAVORITE_SLOTS,
+    MAX_FAVORITES,
     MAX_COMMAND_MS,
     MAX_LAG_MS,
+    MATTRESS_DUAL,
+    MATTRESS_SINGLE,
     MAX_TRAVEL_MS,
     MIN_TRAVEL_MS,
     MODE_SEQUENTIAL,
+    MOTOR_NAMES,
     OVERRUN_FACTOR,
     OVERRUN_MIN_MS,
     REFRESH_BEFORE_MS,
@@ -84,6 +87,7 @@ class MotorState:
     move_start: float = 0.0  # ab hier bewegt sich der Rost wirklich
     end: float = 0.0  # hier schaltet die Box ab
     endpoint: bool = False  # Fahrt zielt mit Nachlauf auf eine Endlage
+    at_end: int = 0  # UP/DOWN: letzte Fahrt ist sicher an dieser Endlage angekommen
 
 
 @dataclass
@@ -111,12 +115,17 @@ class BedController:
         motors: list[str],
         mode: str = "parallel",
         clock: Callable[[], float] = time.monotonic,
+        mattress: str = MATTRESS_DUAL,
+        max_diff: float = 0.10,
     ) -> None:
         self.api = api
         self.sides = list(sides)
         self.motors = list(motors)
         self.mode = mode
         self._clock = clock
+        self.mattress = mattress
+        self.max_diff = max_diff  # Anteil 0..1
+        self._limit_hit: tuple[float, str] | None = None
         self.calibration: dict[str, dict[str, dict[str, float]]] = {
             s: {
                 m: {"up": DEFAULT_TRAVEL_MS, "down": DEFAULT_TRAVEL_MS, "lag_up": 0.0, "lag_down": 0.0}
@@ -127,9 +136,8 @@ class BedController:
         self.state: dict[str, dict[str, MotorState]] = {
             s: {m: MotorState() for m in self.motors} for s in self.sides
         }
-        self.favorites: dict[str, dict[str, dict[str, float]] | None] = {
-            str(i): None for i in range(1, FAVORITE_SLOTS + 1)
-        }
+        # Favoriten: id -> {"name": str, "positions": {seite: {motor: 0..1}}}
+        self.favorites: dict[str, dict[str, Any]] = {}
         self.available = True
         self.last_error: str | None = None
         self.measure: dict[str, Any] | None = None
@@ -194,7 +202,7 @@ class BedController:
             "calibration": self.calibration,
             "positions": {
                 s: {
-                    m: {"pos": round(self.position(s, m, now), 4), "known": st.known}
+                    m: {"pos": round(self.position(s, m, now), 4), "known": st.known, "at_end": st.at_end}
                     for m, st in motors.items()
                 }
                 for s, motors in self.state.items()
@@ -220,10 +228,14 @@ class BedController:
                     self.state[s][m] = MotorState(
                         pos=min(1.0, max(0.0, float(vals.get("pos", 0.0)))),
                         known=bool(vals.get("known", False)),
+                        at_end=int(vals.get("at_end", 0)),
                     )
-        for slot, fav in (data.get("favorites") or {}).items():
-            if slot in self.favorites:
-                self.favorites[slot] = fav
+        for fav_id, fav in (data.get("favorites") or {}).items():
+            if not fav:
+                continue  # leerer Platz aus Version 0.1
+            if "positions" not in fav:
+                fav = {"name": f"Favorit {fav_id}", "positions": fav}  # Format aus Version 0.1
+            self.favorites[str(fav_id)] = {"name": str(fav["name"]), "positions": fav["positions"]}
 
     # ------------------------------------------------------------------ Modell
 
@@ -272,6 +284,7 @@ class BedController:
         if finished and st.endpoint:
             st.pos = 1.0 if st.direction == UP else 0.0
             st.known = True
+            st.at_end = st.direction
         st.direction = 0
         st.endpoint = False
 
@@ -314,6 +327,7 @@ class BedController:
                         st.endpoint = step.endpoints.get(motor, False)
                         continue
                     self._settle(side, motor, started)
+                    st.at_end = 0
                     st.direction = direction
                     st.start = started
                     st.move_start = started + self.lag_ms(side, motor, direction) / 1000
@@ -337,6 +351,12 @@ class BedController:
             if motor in targets:
                 x = targets[motor]
                 p = self.position(side, motor, now)
+                st = self.state[side][motor]
+                at_target_end = not self.is_moving(side, motor, now) and (
+                    (x <= 0.0 and st.at_end == DOWN) or (x >= 1.0 and st.at_end == UP)
+                )
+                if at_target_end:
+                    continue  # steht nachweislich schon am Endschalter
                 if x <= 0.0:
                     t = self.travel_ms(side, motor, DOWN)
                     plan[motor] = (DOWN, p * t + overrun_ms(t), True)
@@ -518,16 +538,70 @@ class BedController:
 
     # ------------------------------------------------------------------ Öffentliche Befehle
 
+    # ------------------------------------------------------------------ Matratzenmodus
+
+    @property
+    def side_limit(self) -> float | None:
+        """Erlaubter Höhenunterschied der Seiten oder None (frei)."""
+        if self.mattress == MATTRESS_SINGLE and len(self.sides) == 2:
+            return self.max_diff
+        return None
+
+    def _note_limit(self, motor: str, now: float) -> None:
+        self._limit_hit = (now, f"{MOTOR_NAMES.get(motor, motor)}: begrenzt durch Matratzenmodus")
+
+    def _limit_targets(
+        self, targets: dict[str, dict[str, float]], now: float
+    ) -> dict[str, dict[str, float]]:
+        """Ziele so begrenzen, dass die Seiten höchstens ``side_limit`` auseinanderliegen.
+
+        Bewegungen, die den Abstand verkleinern, sind immer erlaubt. Würde eine Begrenzung
+        die Fahrtrichtung umdrehen, bleibt der Motor stattdessen stehen.
+        """
+        d = self.side_limit
+        if d is None:
+            return targets
+        out = {s: dict(t) for s, t in targets.items()}
+        for m in self.motors:
+            ta = out.get(SIDE_A, {}).get(m)
+            tb = out.get(SIDE_B, {}).get(m)
+            if ta is not None and tb is not None:
+                if abs(ta - tb) > d + 1e-6:
+                    mid = min(1.0 - d / 2, max(d / 2, (ta + tb) / 2))
+                    lo, hi = mid - d / 2, mid + d / 2
+                    out[SIDE_A][m], out[SIDE_B][m] = (hi, lo) if ta > tb else (lo, hi)
+                    self._note_limit(m, now)
+                continue
+            if ta is None and tb is None:
+                continue
+            side, other = (SIDE_A, SIDE_B) if ta is not None else (SIDE_B, SIDE_A)
+            x = out[side][m]
+            p = self.position(side, m, now)
+            ref = self.position(other, m, now)
+            limited = min(ref + d, max(ref - d, x))
+            if abs(limited - x) > 1e-6:
+                self._note_limit(m, now)
+                if (x - p) * (limited - p) <= 0:
+                    limited = p  # Richtung würde sich umdrehen: stehen bleiben
+                out[side][m] = limited
+        return out
+
     async def move_to(self, targets: dict[str, dict[str, float]]) -> None:
         """Ziele je Seite und Motor (0..1) anfahren – jede Seite mit eigener Laufzeit."""
         now = self._clock()
         self._settle_finished(now)
+        limit_before = self._limit_hit
+        targets = self._limit_targets(targets, now)
         plans = {
             side: self._plan_side(side, motor_targets, now)
             for side, motor_targets in targets.items()
             if side in self.sides
         }
-        self._schedule(self._build_steps(plans, now))
+        steps = self._build_steps(plans, now)
+        if steps:
+            self._schedule(steps)
+        if self._limit_hit is not limit_before:
+            self._notify()  # Hinweis auch dann zeigen, wenn gar nicht gefahren wird
 
     async def start_move(self, sides: list[str], motor: str, direction: int) -> None:
         """Halten: Richtung Endlage losfahren (wird mit stop_motor beendet)."""
@@ -558,6 +632,17 @@ class BedController:
         """Eine Seite für eine feste Befehlszeit fahren (Dienst "move")."""
         now = self._clock()
         self._settle_finished(now)
+        if self.side_limit is not None:
+            delay = self._start_delay_ms(side, motor, direction, now)
+            travel = self.travel_ms(side, motor, direction)
+            p = self.position(side, motor, now)
+            wanted = p + direction * max(0.0, ms - delay) / travel
+            allowed = self._limit_targets({side: {motor: wanted}}, now)[side][motor]
+            if abs(allowed - wanted) > 1e-6:
+                if (allowed - p) * direction <= 0:
+                    self._notify()
+                    return
+                ms = round(delay + abs(allowed - p) * travel)
         others, eps = self._command(side, self._plan_side(side, {}, now), now)
         others[motor] = (direction, int(ms))
         eps[motor] = False
@@ -588,25 +673,102 @@ class BedController:
                 plans[s][m] = (DOWN, t + overrun_ms(t), True)
         self._schedule(self._build_steps(plans, now))
 
-    async def goto_favorite(self, slot: str) -> bool:
-        fav = self.favorites.get(str(slot))
-        if not fav:
+    def find_favorite(self, key: str) -> str | None:
+        """Favorit über id oder Namen (ohne Groß/klein) finden."""
+        key = str(key).strip()
+        if key in self.favorites:
+            return key
+        for fav_id, fav in self.favorites.items():
+            if fav["name"].casefold() == key.casefold():
+                return fav_id
+        return None
+
+    def _check_name(self, name: str, own_id: str | None = None) -> str:
+        name = " ".join(str(name).split())
+        if not name:
+            raise ValueError("Der Name darf nicht leer sein")
+        if len(name) > 40:
+            raise ValueError("Der Name ist zu lang (höchstens 40 Zeichen)")
+        other = self.find_favorite(name)
+        if other is not None and other != own_id:
+            raise ValueError(f"Es gibt schon einen Favoriten „{name}“")
+        return name
+
+    def _current_positions(self) -> dict[str, dict[str, float]]:
+        now = self._clock()
+        return {s: {m: round(self.position(s, m, now), 4) for m in self.motors} for s in self.sides}
+
+    def save_favorite(self, name: str | None = None, fav_id: str | None = None) -> str:
+        """Aktuelle Lage beider Seiten speichern – neu oder über einen bestehenden Favoriten."""
+        if fav_id is not None and fav_id in self.favorites:
+            fav = self.favorites[fav_id]
+            if name:
+                fav["name"] = self._check_name(name, fav_id)
+            fav["positions"] = self._current_positions()
+        else:
+            if len(self.favorites) >= MAX_FAVORITES:
+                raise ValueError(f"Höchstens {MAX_FAVORITES} Favoriten")
+            fav_id = str(max((int(i) for i in self.favorites if i.isdigit()), default=0) + 1)
+            name = self._check_name(name or f"Favorit {fav_id}")
+            self.favorites[fav_id] = {"name": name, "positions": self._current_positions()}
+        self._save()
+        self._notify()
+        return fav_id
+
+    def rename_favorite(self, fav_id: str, name: str) -> None:
+        if fav_id not in self.favorites:
+            raise ValueError("Favorit nicht gefunden")
+        self.favorites[fav_id]["name"] = self._check_name(name, fav_id)
+        self._save()
+        self._notify()
+
+    def delete_favorite(self, fav_id: str) -> None:
+        if self.favorites.pop(fav_id, None) is None:
+            raise ValueError("Favorit nicht gefunden")
+        self._save()
+        self._notify()
+
+    def move_favorite(self, fav_id: str, offset: int) -> None:
+        """Reihenfolge ändern (-1 = nach vorne, +1 = nach hinten)."""
+        ids = list(self.favorites)
+        if fav_id not in ids:
+            raise ValueError("Favorit nicht gefunden")
+        i = ids.index(fav_id)
+        j = min(len(ids) - 1, max(0, i + offset))
+        ids.insert(j, ids.pop(i))
+        self.favorites = {k: self.favorites[k] for k in ids}
+        self._save()
+        self._notify()
+
+    async def goto_favorite(self, key: str, sides: list[str] | None = None) -> bool:
+        """Favorit anfahren: jeder Motor fährt gezielt von seiner aktuellen Lage hoch oder runter."""
+        fav_id = self.find_favorite(key)
+        if fav_id is None:
             return False
+        positions = self.favorites[fav_id]["positions"]
+        wanted = sides or self.sides
         targets = {
             s: {m: float(v) for m, v in motors.items() if m in self.motors}
-            for s, motors in fav.items()
-            if s in self.sides
+            for s, motors in positions.items()
+            if s in self.sides and s in wanted
         }
         await self.move_to(targets)
         return True
 
-    def save_favorite(self, slot: str) -> None:
+    def active_favorite(self, tolerance: float = 0.02) -> str | None:
+        """Favorit, der gerade eingestellt ist (alle Motoren beider Seiten innerhalb der Toleranz)."""
         now = self._clock()
-        self.favorites[str(slot)] = {
-            s: {m: round(self.position(s, m, now), 4) for m in self.motors} for s in self.sides
-        }
-        self._save()
-        self._notify()
+        if self.any_moving(now):
+            return None
+        for fav_id, fav in self.favorites.items():
+            pos = fav["positions"]
+            if all(
+                abs(self.position(s, m, now) - float(pos.get(s, {}).get(m, -9))) <= tolerance
+                for s in self.sides
+                for m in self.motors
+            ):
+                return fav_id
+        return None
 
     def set_calibration(self, side: str, motor: str, key: str, ms: float) -> None:
         """Einen Kalibrierwert setzen (``up``, ``down``, ``lag_up``, ``lag_down``)."""
@@ -624,6 +786,7 @@ class BedController:
         self._reanchor(side, motor, now)
         st = self.state[side][motor]
         st.pos = min(1.0, max(0.0, pos))
+        st.at_end = 0
         if st.direction:
             st.start = now
             st.move_start = max(st.move_start, now)
@@ -844,7 +1007,13 @@ class BedController:
                 for s in self.sides
             },
             "calibration": self.calibration,
-            "favorites": self.favorites,
+            "favorites": [{"id": k, **v} for k, v in self.favorites.items()],
+            "mattress": self.mattress,
+            "max_diff": self.max_diff,
+            "limit_hit": self._limit_hit[1]
+            if self._limit_hit and now - self._limit_hit[0] < 4
+            else None,
+            "active_favorite": self.active_favorite(),
             "measure": measure,
             "offset": None
             if not self.offset

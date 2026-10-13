@@ -15,13 +15,22 @@ andere (Totweg), fahren beide Seiten trotzdem im Gleichschritt und kommen auf de
   Auping-App reicht.
 - **Eigenes Bedienfeld „Bett“** in der Seitenleiste (auch in der Home-Assistant-App auf dem Handy):
   Tasten zum Gedrückthalten je Motor, Auswahl Links / Beide synchron / Rechts, Positionsbalken,
-  „Alles flach“, Referenzfahrt, Stopp, drei Favoriten.
+  „Alles flach“, Referenzfahrt, Stopp.
+- **Favoriten mit Namen** (bis zu 20): speichern die *Lage* beider Seiten, nicht eine Fahrzeit. Beim
+  Antippen fährt jeder Motor von seiner aktuellen Lage gezielt hoch oder runter – ein zweites Antippen
+  bewegt nichts mehr. Umbenennen, überschreiben, sortieren, löschen. Ist im Bedienfeld nur eine Seite
+  gewählt, fährt auch nur diese Seite in ihren Favoriten.
+- **Matratzenmodus**: Bei *einer durchgehenden Matratze* darf eine Seite allein höchstens einen
+  einstellbaren Abstand (Standard 10 % des Verstellwegs) von der anderen haben – hält man länger, bleibt
+  der Motor an der Grenze stehen. Bei *zwei Einzelmatratzen* sind die Seiten frei verstellbar.
 - **Kalibrier-Assistent** ohne Stoppuhr: kurze Testfahrt ab der Endlage, du sagst „links höher“,
   „rechts höher“ oder „gleich hoch“ – der Startversatz wird schrittweise eingegrenzt.
 - **Entitäten für Automationen**: je Motor eine Abdeckung (`cover`) pro Seite und eine für beide Seiten
-  synchron, mit Position in Prozent; Tasten (`button`) für Flach, Referenzfahrt, Stopp, Favoriten;
-  Kalibrierwerte als `number`; Verbindung und Firmware als Diagnose.
-- **Dienste** `auping_local.move_to`, `move`, `stop`, `flat`, `home`, `goto_favorite`, `save_favorite`.
+  synchron, mit Position in Prozent; Tasten (`button`) für Flach, Referenzfahrt, Stopp und je Favorit;
+  Auswahl `Favorit` (zeigt den gerade eingestellten Favoriten) und `Matratze`; Kalibrierwerte und
+  maximaler Seitenunterschied als `number`; Verbindung und Firmware als Diagnose.
+- **Dienste** `auping_local.move_to`, `move`, `stop`, `flat`, `home`, `goto_favorite`, `save_favorite`,
+  `delete_favorite`.
 - Rein lokal: HTTP zur Box im eigenen WLAN, sonst nichts.
 
 Nicht unterstützt: die neuere **SmartBase** (Bluetooth, Gerätename `AUPING_CM`) – nur die WLAN-Box.
@@ -81,7 +90,7 @@ genullt.
   nicht mehr – einmal *Referenzfahrt* oder *Alles flach* stellt das wieder her.
 - Die App schickt nie Befehle über 30 s; längere Fahrten werden automatisch nachgeschoben.
 
-## Automationen – Beispiel
+## Automationen – Beispiele
 
 ```yaml
 action: auping_local.move_to
@@ -89,6 +98,12 @@ data:
   side: both
   motor: back
   position: 40
+```
+
+```yaml
+action: auping_local.goto_favorite
+data:
+  favorite: Lesen
 ```
 
 ## Entwicklung

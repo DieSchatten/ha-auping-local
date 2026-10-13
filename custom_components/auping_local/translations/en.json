@@ -22,13 +22,17 @@
           "sides_count": "Bed sides",
           "name_a": "Name side A",
           "name_b": "Name side B",
-          "mode": "Driving both sides"
+          "mode": "Driving both sides",
+          "mattress": "Mattress",
+          "max_diff": "Max. height difference of the sides"
         },
         "data_description": {
           "motors": "Which parts can be adjusted.",
           "name_a": "Control unit A.",
           "name_b": "Control unit B.",
-          "mode": "Use simultaneous if both sides start in the panel test."
+          "mode": "Use simultaneous if both sides start in the panel test.",
+          "mattress": "With one mattress across both bases, one side may only deviate a limited amount.",
+          "max_diff": "Percent of the travel. Only used with one mattress."
         }
       },
       "reauth_confirm": {
@@ -62,13 +66,17 @@
           "sides_count": "Bed sides",
           "name_a": "Name side A",
           "name_b": "Name side B",
-          "mode": "Driving both sides"
+          "mode": "Driving both sides",
+          "mattress": "Mattress",
+          "max_diff": "Max. height difference of the sides"
         },
         "data_description": {
           "motors": "Which parts can be adjusted.",
           "name_a": "Control unit A.",
           "name_b": "Control unit B.",
-          "mode": "Use simultaneous if both sides start in the panel test."
+          "mode": "Use simultaneous if both sides start in the panel test.",
+          "mattress": "With one mattress across both bases, one side may only deviate a limited amount.",
+          "max_diff": "Percent of the travel. Only used with one mattress."
         }
       }
     },
@@ -181,29 +189,47 @@
     },
     "goto_favorite": {
       "name": "Go to favorite",
-      "description": "Moves to a stored position.",
+      "description": "Moves to a stored favorite, each motor up or down from its current position.",
       "fields": {
         "config_entry_id": {
           "name": "Bed",
           "description": "Only needed with several beds."
         },
-        "slot": {
+        "favorite": {
           "name": "Favorite",
-          "description": "Slot 1 to 3."
+          "description": "Name of the favorite."
+        },
+        "side": {
+          "name": "Side",
+          "description": "Both or one side."
         }
       }
     },
     "save_favorite": {
       "name": "Save favorite",
-      "description": "Stores the current position.",
+      "description": "Stores the current position under this name (overwrites an existing one).",
       "fields": {
         "config_entry_id": {
           "name": "Bed",
           "description": "Only needed with several beds."
         },
-        "slot": {
+        "name": {
+          "name": "Name",
+          "description": "e.g. Reading."
+        }
+      }
+    },
+    "delete_favorite": {
+      "name": "Delete favorite",
+      "description": "Deletes a favorite.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Bed",
+          "description": "Only needed with several beds."
+        },
+        "favorite": {
           "name": "Favorite",
-          "description": "Slot 1 to 3."
+          "description": "Name of the favorite."
         }
       }
     }
