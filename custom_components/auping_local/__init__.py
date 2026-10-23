@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 import voluptuous as vol
@@ -17,12 +19,15 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.components import persistent_notification
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import panel, websocket
+from .discovery import find_box
 from .api import AupingAuthError, AupingConnectApi, AupingError
 from .const import (
     CONF_HOST,
@@ -119,6 +124,67 @@ def apply_mattress(
     ctl._notify()  # noqa: SLF001
 
 
+class BoxFinder:
+    """Sucht die Box im Heimnetz, wenn sie unter der gespeicherten Adresse nicht antwortet.
+
+    Läuft nur nach Fehlern. Bleibt die Suche erfolglos (Box aus, Stecker gezogen),
+    werden die Pausen bis zur nächsten Suche immer länger.
+    """
+
+    PAUSES_S = (60, 300, 900, 1800, 3600)
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: AupingConnectApi) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.api = api
+        self._lock = asyncio.Lock()
+        self._next_allowed = 0.0
+        self._failures = 0
+
+    def reset(self) -> None:
+        """Box antwortet wieder: beim nächsten Ausfall sofort suchen."""
+        self._failures = 0
+        self._next_allowed = 0.0
+
+    async def search(self) -> bool:
+        """True, wenn die Box unter einer neuen Adresse gefunden und übernommen wurde."""
+        if self._lock.locked() or time.monotonic() < self._next_allowed:
+            return False
+        async with self._lock:
+            extra: tuple[str, ...] = ()
+            try:
+                from homeassistant.components import network  # noqa: PLC0415
+
+                extra = (await network.async_get_source_ip(self.hass),)
+            except Exception:  # noqa: BLE001 – ohne Netzwerk-Info nur um die alte Adresse suchen
+                pass
+            old = self.api.host
+            new = await find_box(
+                async_get_clientsession(self.hass), old, self.entry.data[CONF_XKEY], self.entry.data.get(CONF_MAC), extra
+            )
+            if not new or new == old:
+                pause = self.PAUSES_S[min(self._failures, len(self.PAUSES_S) - 1)]
+                self._failures += 1
+                self._next_allowed = time.monotonic() + pause
+                _LOGGER.info("Auping-Box nicht gefunden – nächste Suche frühestens in %d s", pause)
+                return False
+            self.reset()
+            self.api.host = new
+            self.hass.config_entries.async_update_entry(self.entry, data={**self.entry.data, CONF_HOST: new})
+            registry = dr.async_get(self.hass)
+            for device in dr.async_entries_for_config_entry(registry, self.entry.entry_id):
+                registry.async_update_device(device.id, configuration_url=f"http://{new}")
+            persistent_notification.async_create(
+                self.hass,
+                f"Die Auping-Box hatte eine neue IP-Adresse und wurde unter **{new}** wiedergefunden "
+                f"(vorher {old}). Die neue Adresse ist übernommen.\n\n"
+                "Tipp: Im Router eine feste IP-Adresse für die Box vergeben.",
+                title="Auping Bett: neue Adresse übernommen",
+                notification_id=f"{DOMAIN}_{self.entry.entry_id}_new_host",
+            )
+            return True
+
+
 def read_version() -> dict[str, Any]:
     """Version aus manifest.json und (falls vom Installationsskript erzeugt) version.json."""
     base = Path(__file__).parent
@@ -160,13 +226,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: AupingConfigEntry) -> bo
     controller.set_save_callback(lambda: store.async_delay_save(controller.export_state, 2.0))
     controller.start()
 
+    finder = BoxFinder(hass, entry, api)
+
     async def _update() -> dict[str, Any]:
         try:
-            return await api.get_config()
+            data = await api.get_config()
         except AupingAuthError as err:
             raise ConfigEntryAuthFailed("Der Kopplungsschlüssel wurde abgelehnt") from err
         except AupingError as err:
+            # Nur jetzt (Box antwortet nicht) im Netz nach einer neuen Adresse suchen.
+            if await finder.search():
+                try:
+                    return await api.get_config()
+                except AupingError:
+                    pass
             raise UpdateFailed(f"Box nicht erreichbar: {err}") from err
+        finder.reset()
+        return data
 
     coordinator: DataUpdateCoordinator[dict[str, Any]] = DataUpdateCoordinator(
         hass,
@@ -176,6 +252,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AupingConfigEntry) -> bo
         update_method=_update,
         update_interval=timedelta(minutes=2),
     )
+    # Schlägt ein Fahrbefehl fehl, sofort Status prüfen (und ggf. die Box suchen).
+    controller.set_error_callback(lambda: hass.async_create_task(coordinator.async_request_refresh()))
     # Nicht blockieren: Ist die Box gerade aus, startet die Integration trotzdem.
     await coordinator.async_refresh()
 

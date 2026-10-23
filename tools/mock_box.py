@@ -87,8 +87,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--key", default="testtest")
     parser.add_argument("--serial", action="store_true", help="Box bedient nur eine Seite gleichzeitig")
+    parser.add_argument("--bind", default="0.0.0.0", help="nur auf dieser Adresse lauschen (z. B. 127.0.0.2)")
     args = parser.parse_args()
-    web.run_app(build_app(args.key, not args.serial), host="0.0.0.0", port=args.port)
+    web.run_app(build_app(args.key, not args.serial), host=args.bind, port=args.port)
 
 
 if __name__ == "__main__":

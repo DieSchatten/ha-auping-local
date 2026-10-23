@@ -63,8 +63,11 @@ neu starten.
    IP-Adresse und Code eingeben (oder den QR-Text einfügen).
 3. Bett-Typ, Motoren und Seiten werden aus der Box gelesen und vorgeschlagen; Namen der Seiten anpassen.
 
-Tipp: Der Box im Router eine feste IP-Adresse geben. Ändert sie sich doch, lässt sie sich in den Optionen
-der Integration anpassen.
+Bekommt die Box vom Router eine neue IP-Adresse, findet die Integration sie selbst wieder: Nur wenn die
+Box nicht antwortet, durchsucht sie das Heimnetz (/24) nach Geräten, die ohne Schlüssel mit 403 antworten,
+und übernimmt das, das mit dem Schlüssel antwortet und dieselbe MAC-Adresse meldet. Bleibt die Box weg,
+werden die Pausen zwischen den Suchen länger (bis 60 Minuten). Eine feste IP-Adresse im Router schadet
+trotzdem nicht; ändern lässt sie sich auch in den Optionen der Integration.
 
 ## Erste Schritte nach der Einrichtung
 

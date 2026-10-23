@@ -1,6 +1,9 @@
 {
   "domain": "auping_local",
   "name": "Auping Bett (lokal)",
+  "after_dependencies": [
+    "network"
+  ],
   "codeowners": [
     "@DieSchatten"
   ],
@@ -16,7 +19,7 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/DieSchatten/ha-auping-local/issues",
   "requirements": [],
-  "version": "0.4.1",
+  "version": "0.4.2",
   "zeroconf": [
     {
       "type": "_http._tcp.local.",

@@ -286,6 +286,9 @@ class AupingOptionsFlow(OptionsFlowWithReload):
             else:
                 if host and host != entry.data[CONF_HOST]:
                     self.hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: host})
+                    if options == dict(entry.options):
+                        # Nur die Adresse geändert: Home Assistant lädt dann nicht von selbst neu.
+                        self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_create_entry(data=options)
         defaults = {
             CONF_REMOTE: remote,

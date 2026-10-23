@@ -159,6 +159,7 @@ class BedController:
         self._calib_task: asyncio.Task | None = None
         self._listeners: list[Callable[[], None]] = []
         self._save_cb: Callable[[], None] | None = None
+        self._error_cb: Callable[[], None] | None = None
         self._idle = asyncio.Event()
         self._idle.set()
 
@@ -180,6 +181,10 @@ class BedController:
 
     def set_save_callback(self, cb: Callable[[], None]) -> None:
         self._save_cb = cb
+
+    def set_error_callback(self, cb: Callable[[], None]) -> None:
+        """Wird aufgerufen, wenn ein Befehl nicht bei der Box ankommt."""
+        self._error_cb = cb
 
     def add_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
         self._listeners.append(cb)
@@ -610,6 +615,8 @@ class BedController:
                 self.available = False
                 self.last_error = str(err)
                 self._notify()
+                if self._error_cb:
+                    self._error_cb()
                 continue
             rtt = getattr(self.api, "last_rtt_ms", None)
             entry.update(ok=True, rtt=None if rtt is None else round(rtt))
