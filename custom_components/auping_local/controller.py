@@ -61,6 +61,7 @@ TRAIL_MAX = 200  # gemerkte Fahrten seit der letzten "gleich hoch"-Lage je Seite
 TEST_MOVE_MS = 3000  # Testfahrt zum Prüfen des Versatzes
 RELEVEL_EXTRA_MS = 1500
 REVERSE_PAUSE_S = 0.5  # vor einer Richtungsumkehr: erst Stopp, dann so lange warten
+MERGE_TOLERANCE_MS = 100  # so kleine Unterschiede dürfen zu einem gemeinsamen Befehl werden
 
 
 class MotorApi(Protocol):
@@ -102,6 +103,10 @@ class Step:
     sides: tuple[str, ...]
     motors: dict[str, tuple[int, int]]
     endpoints: dict[str, bool] = field(default_factory=dict)
+    # Nach einem Umkehr-Stopp: ``at`` zählt ab dem Zeitpunkt, an dem dieser Stopp wirklich
+    # rausging – auch wenn er hinter einer noch laufenden Anfrage warten musste.
+    after: Step | None = field(default=None, repr=False)
+    started: float | None = field(default=None, repr=False)  # vom Runner gesetzt
 
 
 # Plan je Seite: Motor -> (Richtung, reine Bewegungszeit in ms, Endlage?)
@@ -152,6 +157,7 @@ class BedController:
         self._last_stop_at = 0.0
 
         self._pending: list[tuple[float, int, Step]] = []
+        self._in_flight: Step | None = None  # Anfrage ist unterwegs, Antwort steht noch aus
         self._seq = 0
         self._wake = asyncio.Event()
         self._runner: asyncio.Task | None = None
@@ -464,7 +470,7 @@ class BedController:
         kurz warten und danach neu losfahren – wie die Original-App. Die Steuereinheiten nehmen
         eine direkte Umkehr nicht zuverlässig an. Gibt den Stopp-Schritt zurück (oder [])."""
         reversing = any(
-            self.is_moving(s, m, now) == -d for s, plan in plans.items() for m, (d, _, _) in plan.items()
+            self._commanded(s, m, now) == -d for s, plan in plans.items() for m, (d, _, _) in plan.items()
         )
         if not reversing:
             return []
@@ -478,8 +484,24 @@ class BedController:
     def _pending_for(self, side: str) -> bool:
         return any(side in p[2].sides for p in self._pending)
 
-    def _side_moving(self, side: str, now: float) -> bool:
-        return any(self.is_moving(side, m, now) for m in self.motors)
+    def _commanded(self, side: str, motor: str, now: float) -> int:
+        """Richtung des Motors – auch wenn der Befehl dafür gerade erst unterwegs ist."""
+        flight = self._in_flight
+        if flight is not None and side in flight.sides:
+            direction, ms = flight.motors.get(motor, (0, 0))
+            return direction if ms > 0 else 0
+        return self.is_moving(side, motor, now)
+
+    def _side_busy(self, side: str, now: float) -> bool:
+        """Fährt die Seite, wartet ein Befehl für sie oder ist einer unterwegs? Dann braucht sie
+        einen Stopp – sonst fährt ein Start, der beim Loslassen noch unterwegs war, ungebremst
+        bis zum Anschlag."""
+        flight = self._in_flight
+        return (
+            any(self.is_moving(side, m, now) for m in self.motors)
+            or self._pending_for(side)
+            or (flight is not None and side in flight.sides)
+        )
 
     def _command(self, side: str, plan: SidePlan, at: float, moved: frozenset[str] = frozenset()):
         """Bewegungszeiten in Befehlszeiten umrechnen (offenen Leerweg dazu).
@@ -502,11 +524,12 @@ class BedController:
             offsets = self._start_offsets(plans, now) if len(sides) == 2 else {}
             steps = []
             for s in sides:
-                if not plans[s] and not self._side_moving(s, now):
+                if not plans[s] and not self._side_busy(s, now):
                     continue
                 at = offsets.get(s, 0.0)
                 motors, eps = self._command(s, plans[s], now + at)
                 steps.append(Step(at, CBU_FOR_SIDE[s], (s,), motors, eps))
+            steps = _merge_sides(steps)
         out: list[Step] = []
         for step in steps:
             out.extend(_split_long(step))
@@ -562,7 +585,7 @@ class BedController:
                 motors, eps = self._command(side, rest[side], now + t, moved=frozenset(common))
                 steps.append(Step(t, CBU_FOR_SIDE[side], (side,), motors, eps))
                 t += max(ms for _, ms in motors.values()) / 1000 + SEQ_GAP_S
-            elif not common and self._side_moving(side, now):
+            elif not common and self._side_busy(side, now):
                 steps.append(Step(t, CBU_FOR_SIDE[side], (side,), {}))
         if not steps:
             steps.append(Step(0.0, CBU_BOTH, (SIDE_A, SIDE_B), {}))
@@ -592,6 +615,8 @@ class BedController:
                 await self._wake.wait()
                 continue
             due, _, step = self._pending[0]
+            if step.after is not None and step.after.started is not None:
+                due = max(due, step.after.started + step.at)
             delay = due - self._clock()
             if delay > 0:
                 self._wake.clear()
@@ -607,19 +632,25 @@ class BedController:
                 "motors": {m: [d, ms] for m, (d, ms) in step.motors.items()},
             }
             self.command_log.append(entry)
+            self._in_flight = step
             try:
                 started = await self.api.send_motors(step.cbu, step.motors)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Befehl an die Box fehlgeschlagen: %s", err)
-                entry.update(ok=False, error=str(err))
+                entry.update(ok=False, error=str(err) or type(err).__name__)
                 self.available = False
-                self.last_error = str(err)
+                self.last_error = entry["error"]
                 self._notify()
                 if self._error_cb:
                     self._error_cb()
                 continue
+            finally:
+                self._in_flight = None
+            step.started = started
             rtt = getattr(self.api, "last_rtt_ms", None)
             entry.update(ok=True, rtt=None if rtt is None else round(rtt))
+            if getattr(self.api, "last_attempts", 1) > 1:
+                entry["retry"] = True
             self.available = True
             self.last_error = None
             self._apply_step(step, started)
@@ -726,6 +757,7 @@ class BedController:
         if stop_first:
             for step in steps:
                 step.at += REVERSE_PAUSE_S
+                step.after = stop_first[0]
             steps = stop_first + steps
         if steps or any(self._pending_for(s) for s in plans):
             self._schedule(steps, tuple(plans))
@@ -784,8 +816,10 @@ class BedController:
         others, eps = self._command(side, self._plan_side(side, {}, now), now)
         others[motor] = (direction, int(ms))
         eps[motor] = False
-        steps = _split_long(Step(REVERSE_PAUSE_S if stop_first else 0.0, CBU_FOR_SIDE[side], (side,), others, eps))
-        self._schedule(stop_first + steps)
+        step = Step(0.0, CBU_FOR_SIDE[side], (side,), others, eps)
+        if stop_first:
+            step.at, step.after = REVERSE_PAUSE_S, stop_first[0]
+        self._schedule(stop_first + _split_long(step))
 
     def _stop_now(self) -> None:
         now = self._clock()
@@ -1294,9 +1328,36 @@ def _split_long(step: Step) -> list[Step]:
     run = MAX_COMMAND_MS - REFRESH_BEFORE_MS
     while any(ms > MAX_COMMAND_MS for _, ms in motors.values()):
         first = {m: (d, min(ms, MAX_COMMAND_MS)) for m, (d, ms) in motors.items()}
-        out.append(Step(at, step.cbu, step.sides, first, step.endpoints))
+        out.append(Step(at, step.cbu, step.sides, first, step.endpoints, None if out else step.after))
         at += run / 1000
         motors = {m: (d, ms - run) for m, (d, ms) in motors.items() if ms - run >= MIN_MOVE_MS}
     if motors or not out:
-        out.append(Step(at, step.cbu, step.sides, motors, step.endpoints))
+        out.append(Step(at, step.cbu, step.sides, motors, step.endpoints, None if out else step.after))
     return out
+
+
+def _merge_sides(steps: list[Step]) -> list[Step]:
+    """Gleiche Befehle für A und B als EINEN Befehl an beide Seiten (CBU 0) – wie die Original-App.
+
+    Zwei Anfragen nacheinander lassen die zweite Seite um die Antwortzeit der Box später
+    loslaufen, und lehnt die Box die zweite Verbindung ab, fährt nur eine Seite. Zusammengelegt
+    wird nur, was gleichzeitig startet und dieselben Motoren in dieselbe Richtung fährt. Fahrten
+    zur Endlage bekommen die längere Zeit (der Endschalter stoppt), Zielfahrten nur bei
+    höchstens ``MERGE_TOLERANCE_MS`` Unterschied.
+    """
+    if len(steps) != 2:
+        return steps
+    a, b = steps
+    if {a.sides, b.sides} != {(SIDE_A,), (SIDE_B,)} or abs(a.at - b.at) > 1e-6 or a.motors.keys() != b.motors.keys():
+        return steps
+    motors: dict[str, tuple[int, int]] = {}
+    for m, (d, ms) in a.motors.items():
+        d_b, ms_b = b.motors[m]
+        endpoint = a.endpoints.get(m, False)
+        if d != d_b or endpoint != b.endpoints.get(m, False):
+            return steps
+        if not endpoint and abs(ms - ms_b) > MERGE_TOLERANCE_MS:
+            return steps
+        motors[m] = (d, max(ms, ms_b))
+    endpoints = {m: a.endpoints.get(m, False) for m in motors}
+    return [Step(a.at, CBU_BOTH, (SIDE_A, SIDE_B), motors, endpoints)]

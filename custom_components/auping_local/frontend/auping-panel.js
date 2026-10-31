@@ -10,6 +10,9 @@ const OWN_VERSION = (() => {
     return null;
   }
 })();
+// Der Server schickt alle 20 s den ganzen Stand. Kommt so lange nichts, ist das Abo verloren
+// (z. B. nach einem Neustart von Home Assistant) – dann neu anmelden.
+const STALE_MS = 50000;
 const TABS = [
   ["remote", "Fernbedienung"],
   ["calib", "Kalibrieren"],
@@ -59,6 +62,12 @@ class AupingPanel extends HTMLElement {
     this._toast = null;
     this._favEdit = false;
     this._lastLimit = null;
+    this._lastMsg = 0;
+    this._watchdog = null;
+    this._onVisible = () => {
+      // Handy-App kommt aus dem Hintergrund: lieber gleich frisch anmelden als alte Werte zeigen.
+      if (document.visibilityState === "visible") this._checkAlive(25000);
+    };
   }
 
   set hass(hass) {
@@ -114,10 +123,20 @@ class AupingPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._unsubscribe();
+    clearInterval(this._watchdog);
+    this._watchdog = null;
+    document.removeEventListener("visibilitychange", this._onVisible);
   }
 
   connectedCallback() {
     if (this._started && !this._unsub && this._entryId) this._subscribe();
+    if (!this._watchdog) this._watchdog = setInterval(() => this._checkAlive(STALE_MS), 10000);
+    document.addEventListener("visibilitychange", this._onVisible);
+  }
+
+  _checkAlive(maxAge) {
+    if (!this._entryId || !this._hass || document.visibilityState !== "visible") return;
+    if (Date.now() - this._lastMsg > maxAge) this._subscribe();
   }
 
   async _init() {
@@ -138,6 +157,7 @@ class AupingPanel extends HTMLElement {
 
   async _subscribe() {
     this._unsubscribe();
+    this._lastMsg = Date.now(); // dem neuen Abo Zeit für die erste Antwort lassen
     try {
       this._unsub = await this._hass.connection.subscribeMessage((msg) => this._onData(msg), {
         type: `${DOMAIN}/subscribe`,
@@ -218,6 +238,7 @@ class AupingPanel extends HTMLElement {
   }
 
   _onData(data) {
+    this._lastMsg = Date.now();
     this._data = data;
     if (!this._calibMotor || !data.motors.includes(this._calibMotor)) {
       this._calibMotor = data.motors.includes("back") ? "back" : data.motors[0];
@@ -809,7 +830,12 @@ class AupingPanel extends HTMLElement {
               .map(([m, [dir, ms]]) => `${esc(d.motor_names[m] || m)} ${act[dir] || ""} ${sec(ms)} s`)
               .join(", ")
           : "Stopp";
-        const res = c.ok === false ? `<span class="err">Fehler: ${esc(c.error || "")}</span>` : c.ok ? `${c.rtt ?? "?"} ms` : "…";
+        const res =
+          c.ok === false
+            ? `<span class="err">Fehler: ${esc(c.error || "")}</span>`
+            : c.ok
+              ? `${c.rtt ?? "?"} ms${c.retry ? " (2. Versuch)" : ""}`
+              : "…";
         return `<tr><td>${t}</td><td>${esc(side[c.cbu] ?? c.cbu)}</td><td>${what}</td><td>${res}</td></tr>`;
       })
       .join("")}</tbody></table>`;

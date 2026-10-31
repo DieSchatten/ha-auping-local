@@ -30,6 +30,8 @@ trotzdem im Gleichschritt und kommen auf derselben Höhe an.
 - **Schonender Richtungswechsel**: Wie die Original-App schickt die Integration vor jedem Richtungswechsel
   erst einen Stopp und fährt nach einer halben Sekunde neu los – die Steuereinheiten nehmen eine direkte
   Umkehr nicht zuverlässig an.
+- **Mehrere Geräte gleichzeitig**: Ist das Bedienfeld auf mehreren Handys oder Tablets offen, zeigen
+  alle live dieselbe Lage – auch nach dem Neuladen der Integration oder einem Neustart von Home Assistant.
 - **Entitäten für Automationen**: je Motor eine Abdeckung (`cover`) pro Seite und eine für beide Seiten
   synchron, mit Position in Prozent; Tasten (`button`) für Flach, Referenzfahrt, Stopp und je Favorit;
   Auswahl `Favorit` (zeigt den gerade eingestellten Favoriten) und `Matratze`; Kalibrierwerte und
@@ -101,6 +103,12 @@ Differenz später; jede Seite bekommt `Leerweg + Strecke × Laufzeit`. Beide Ros
 an und halten gleichzeitig an. Lässt du die Taste los, hält die vorne liegende Seite sofort an, eine
 eventuell zurückliegende holt noch auf.
 
+Gleiche Befehle für beide Seiten (z. B. „Beide runter“ halten, Loslassen, „Alles flach“) gehen wie in der
+Original-App als **ein** Befehl an beide Steuereinheiten. So laufen beide Seiten auch bei einer langsam
+antwortenden Box gleichzeitig los, und kurzes Antippen stoppt zuverlässig beide Seiten – auch wenn die Box
+den Start noch gar nicht bestätigt hatte. Bricht die Verbindung zur Box ab, wird ein Befehl einmal
+wiederholt.
+
 Fahrten nach ganz unten bekommen Nachlauf plus Leerweg, damit der Motor immer ganz zurückfährt und der
 Leerweg beim nächsten Hochfahren gleich groß ist. Während dieses Nachlaufs zeigt die Anzeige schon 0 %,
 der Motor läuft aber noch – das Bedienfeld zeigt dann **„sichert Endlage …“**. Fährst du in dieser Zeit
@@ -141,7 +149,7 @@ Die Tests laufen gegen eine simulierte Box (`tools/auping_sim.py`), die sich wie
 gleich schnelle Motoren mit unterschiedlichem Leerweg unten, und eine direkte Richtungsumkehr ohne Stopp
 wird ignoriert. `tools/mock_box.py` bietet dieselbe Simulation als HTTP-Server mit Live-Ansicht unter
 `/sim` – damit lässt sich die Integration in einer Test-Instanz ohne echtes Bett ausprobieren
-(Code `127.0.0.1:8080-testtest`).
+(Code `127.0.0.1:8080-testtest`). Mit `--latency 0.8` antwortet sie so langsam wie eine überlastete Box.
 
 ## Lizenz
 

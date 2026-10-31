@@ -12,10 +12,11 @@ import asyncio
 import copy
 import time
 
+import aiohttp
 import pytest
 
 import auping_local.controller as controller_mod
-from auping_local.api import AupingConnectApi, normalize_xkey, parse_share_code
+from auping_local.api import AupingConnectApi, AupingError, normalize_xkey, parse_share_code
 from auping_local.const import (
     DOWN,
     MATTRESS_DUAL,
@@ -26,7 +27,7 @@ from auping_local.const import (
     motors_for_bed_type,
     sides_for_cbu_type,
 )
-from auping_local.controller import BedController, Step, _split_long
+from auping_local.controller import BedController, Step, _merge_sides, _split_long
 from auping_sim import SimBox
 
 MOTORS = ["head", "back", "legs"]
@@ -79,11 +80,12 @@ def make(
     calibrate_gap=True,
     start=0.0,
     strict_reversal=True,
+    latency=0.02,
 ):
     sim = SimBox(
         copy.deepcopy(travel), parallel=parallel_box, gap=copy.deepcopy(gap), strict_reversal=strict_reversal
     )
-    ctl = BedController(FakeApi(sim), ["a", "b"], MOTORS, mode=mode)
+    ctl = BedController(FakeApi(sim, latency), ["a", "b"], MOTORS, mode=mode)
     for s in ("a", "b"):
         for m in MOTORS:
             if calibrate_travel:
@@ -427,10 +429,126 @@ async def test_release_at_bottom_stops_leader():
     await hold(ctl, ["a", "b"], "back", DOWN, 1.0)  # 0,3 * 1800 ms = 0,54 s bis unten
     await asyncio.wait_for(ctl.wait_idle(), 5)
     await asyncio.sleep(0.05)
-    last = sim.log[-2:]
-    assert all(b["motor_2"]["Action"] == 0 for _, _, b in last), "beide sofort gestoppt"
+    _, cbu, body = sim.log[-1]
+    assert cbu == 0 and body["motor_2"]["Action"] == 0, "beide sofort gestoppt (ein Befehl)"
     await settle(ctl, sim)
     await ctl.async_shutdown()
+
+
+# --------------------------------------------------------------------------- Langsame Box
+
+SLOW = 0.6  # Antwortzeit der Box in s
+
+
+async def test_both_sides_get_one_request():
+    """"Beide runter" halten: ein einziger Befehl an beide Seiten (CBU 0) wie in der Original-App –
+    sonst startet die zweite Seite erst, wenn die Box auf die erste geantwortet hat."""
+    ctl, sim = make(start=0.6, latency=SLOW)
+    sent = len(sim.log)
+    await ctl.start_move(["a", "b"], "back", DOWN)
+    await asyncio.sleep(SLOW / 2 + 0.1)
+    assert sim.moving("a", "back") and sim.moving("b", "back"), "beide Seiten fahren gleichzeitig los"
+    assert [cbu for _, cbu, _ in sim.log[sent:]] == [0]
+    await ctl.stop_motor(["a", "b"], "back")
+    await settle(ctl, sim)
+    assert abs(diff(sim)) < 0.02
+    assert ctl.snapshot()["commands"][-1]["cbu"] == 0
+    await ctl.async_shutdown()
+
+
+@pytest.mark.parametrize("start", [0.5, 0.0])
+async def test_release_while_start_still_on_the_way(start):
+    """Kurz getippt, die Box hat den Start noch nicht bestätigt (aus flach zusätzlich mit
+    Startversatz): beide Seiten bekommen trotzdem ihren Stopp – keine fährt allein durch."""
+    ctl, sim = make(start=start, latency=SLOW)
+    await ctl.start_move(["a", "b"], "back", UP)
+    await asyncio.sleep(0.1)
+    await ctl.stop_motor(["a", "b"], "back")
+    await settle(ctl, sim)
+    for s in ("a", "b"):
+        assert not sim.moving(s, "back")
+        # Der Stopp kann erst nach der laufenden Anfrage raus (0,6 s ≈ 30 % im Testbett) –
+        # durchgefahren wäre 100 %.
+        assert sim.position(s, "back") < start + 0.35, f"Seite {s} ist durchgefahren"
+        assert abs(ctl.position(s, "back") - sim.position(s, "back")) < 0.03
+    assert abs(diff(sim)) < 0.06
+    await ctl.async_shutdown()
+
+
+async def test_reversal_while_start_still_on_the_way():
+    """Hoch gedrückt und sofort runter, während der Hoch-Befehl noch unterwegs ist: erst Stopp,
+    Pause ab dem echten Stopp, dann runter (eine direkte Umkehr ignoriert die Steuereinheit)."""
+    ctl, sim = make(start=0.5, latency=SLOW)
+    sent = len(sim.log)
+    await ctl.start_move(["a", "b"], "back", UP)
+    await asyncio.sleep(0.1)
+    await ctl.start_move(["a", "b"], "back", DOWN)
+    await asyncio.sleep(2.0)
+    await ctl.stop_motor(["a", "b"], "back")
+    await settle(ctl, sim)
+    actions = [(ts, b["motor_2"]["Action"]) for ts, _, b in sim.log[sent:]]
+    assert [a for _, a in actions][:3] == [1, 0, 2], actions
+    assert actions[2][0] - actions[1][0] >= 0.45, "Pause zwischen Stopp und Umkehr"
+    assert sim.position("a", "back") < 0.6, "Umkehr wurde angenommen"
+    assert abs(ctl.position("a", "back") - sim.position("a", "back")) < 0.04
+    assert abs(diff(sim)) < 0.03
+    await ctl.async_shutdown()
+
+
+def test_merge_only_matching_commands():
+    a = Step(0.0, 1, ("a",), {"back": (UP, 1000)}, {"back": False})
+    b = Step(0.0, 2, ("b",), {"back": (UP, 1060)}, {"back": False})
+    merged = _merge_sides([a, b])
+    assert len(merged) == 1 and merged[0].cbu == 0 and merged[0].motors == {"back": (UP, 1060)}
+    far = Step(0.0, 2, ("b",), {"back": (UP, 1300)}, {"back": False})
+    assert len(_merge_sides([a, far])) == 2, "Zielfahrten nur bei kleinem Unterschied"
+    ends = [
+        Step(0.0, 1, ("a",), {"back": (DOWN, 900)}, {"back": True}),
+        Step(0.0, 2, ("b",), {"back": (DOWN, 2400)}, {"back": True}),
+    ]
+    assert _merge_sides(ends)[0].motors == {"back": (DOWN, 2400)}, "Endlage: längere Zeit"
+    later = Step(0.4, 2, ("b",), {"back": (UP, 1000)}, {"back": False})
+    assert len(_merge_sides([a, later])) == 2, "Startversatz bleibt erhalten"
+    other = Step(0.0, 2, ("b",), {"back": (DOWN, 1000)}, {"back": False})
+    assert len(_merge_sides([a, other])) == 2
+    stops = _merge_sides([Step(0.0, 1, ("a",), {}), Step(0.0, 2, ("b",), {})])
+    assert len(stops) == 1 and stops[0].cbu == 0 and stops[0].motors == {}
+
+
+class _Resp:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def text(self):
+        return "{}"
+
+
+class FlakySession:
+    """Lehnt die ersten ``fails`` Verbindungen ab – wie eine kurz überlastete Box."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.calls = 0
+
+    def request(self, method, url, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise aiohttp.ServerDisconnectedError()
+        return _Resp()
+
+
+async def test_dropped_connection_is_retried_once():
+    api = AupingConnectApi(FlakySession(1), "h", "abcdefgh", "regular")  # type: ignore[arg-type]
+    await api.send_motors(0, {"back": (UP, 1000)})
+    assert api.last_attempts == 2
+    api = AupingConnectApi(FlakySession(2), "h", "abcdefgh", "regular")  # type: ignore[arg-type]
+    with pytest.raises(AupingError):
+        await api.send_motors(0, {})
 
 
 # --------------------------------------------------------------------------- Matratzenmodus

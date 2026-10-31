@@ -1,6 +1,7 @@
 """Simulierte Auping-Connect-Box als HTTP-Server – zum Testen ohne echtes Bett.
 
     python tools/mock_box.py --port 8080 --key testtest
+    python tools/mock_box.py --latency 0.8   # langsame Box: 0,8 s bis zur Antwort
 
 Endpunkte wie die echte Box (mit X-Key-Prüfung):
   GET  /api/config
@@ -13,6 +14,7 @@ Zusätzlich (ohne Schlüssel, nur für Tests):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -42,7 +44,7 @@ h+=`<div class=d>Befehle: ${s.commands}</div>`;o.innerHTML=h}
 setInterval(t,150);t()</script>"""
 
 
-def build_app(key: str, parallel: bool) -> web.Application:
+def build_app(key: str, parallel: bool, latency: float = 0.0) -> web.Application:
     sim = SimBox({"a": json.loads(json.dumps(SPEED)), "b": json.loads(json.dumps(SPEED))}, parallel=parallel, gap=GAP, strict_reversal=True)
     app = web.Application()
 
@@ -52,13 +54,17 @@ def build_app(key: str, parallel: bool) -> web.Application:
 
     async def config(request: web.Request) -> web.Response:
         check(request)
+        await asyncio.sleep(latency)
         return web.json_response(sim.config())
 
     async def motor(request: web.Request) -> web.Response:
         check(request)
         body = await request.json()
+        # Wie die echte Box: der Befehl wirkt etwa in der Mitte der Antwortzeit.
+        await asyncio.sleep(latency / 2)
         sim.command(body)
         print("Befehl:", json.dumps(body), flush=True)
+        await asyncio.sleep(latency / 2)
         return web.json_response({"success": True, "msg": "ok"})
 
     async def state(_request: web.Request) -> web.Response:
@@ -88,8 +94,9 @@ def main() -> None:
     parser.add_argument("--key", default="testtest")
     parser.add_argument("--serial", action="store_true", help="Box bedient nur eine Seite gleichzeitig")
     parser.add_argument("--bind", default="0.0.0.0", help="nur auf dieser Adresse lauschen (z. B. 127.0.0.2)")
+    parser.add_argument("--latency", type=float, default=0.0, help="Antwortzeit der Box in Sekunden")
     args = parser.parse_args()
-    web.run_app(build_app(args.key, not args.serial), host=args.bind, port=args.port)
+    web.run_app(build_app(args.key, not args.serial, args.latency), host=args.bind, port=args.port)
 
 
 if __name__ == "__main__":

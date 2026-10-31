@@ -22,6 +22,7 @@ from .const import ACTION_DOWN, ACTION_STOP, ACTION_UP, DOWN, MOTOR_INDEX, UP
 _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = aiohttp.ClientTimeout(total=8)
+RETRY_DELAY_S = 0.2
 
 
 class AupingError(Exception):
@@ -57,6 +58,35 @@ class AupingConnectApi:
         # Die Box ist ein kleiner Mikrocontroller: Anfragen nie überlappen lassen.
         self._lock = asyncio.Lock()
         self.last_rtt_ms: float | None = None
+        self.last_attempts = 1
+
+    async def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, str, float]:
+        """Eine Anfrage (Aufrufer hält den Lock). Gibt Status, Antwort und Sendezeitpunkt zurück.
+
+        Bricht die Verbindung ab, ohne dass eine Antwort kam, gibt es einen zweiten Versuch:
+        Die Box ist ein kleiner Mikrocontroller und lehnt eine Verbindung direkt nach der
+        vorigen gelegentlich ab. Ohne zweiten Versuch bliebe dann eine Seite stehen – oder
+        bekäme ihren Stopp nicht. Bei einer Zeitüberschreitung (8 s) wird nicht wiederholt.
+        """
+        for attempt in (1, 2):
+            sent = time.monotonic()
+            try:
+                async with self._session.request(
+                    method, f"http://{self.host}{path}", headers=self._headers, json=body, timeout=TIMEOUT
+                ) as resp:
+                    text = await resp.text()
+                    self.last_attempts = attempt
+                    return resp.status, text, sent
+            except asyncio.TimeoutError as err:
+                raise AupingError("Box antwortet nicht (Zeitüberschreitung)") from err
+            except aiohttp.ClientConnectionError as err:
+                if attempt == 2:
+                    raise AupingError(str(err) or type(err).__name__) from err
+                _LOGGER.debug("Verbindung zur Box abgebrochen (%s) – zweiter Versuch", err)
+                await asyncio.sleep(RETRY_DELAY_S)
+            except aiohttp.ClientError as err:
+                raise AupingError(str(err) or type(err).__name__) from err
+        raise AssertionError("unreachable")
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -66,17 +96,11 @@ class AupingConnectApi:
     async def get_config(self) -> dict[str, Any]:
         """GET /api/config – liefert Bett-Typ, Seiten, Firmware, MAC usw."""
         async with self._lock:
-            try:
-                async with self._session.get(
-                    f"http://{self.host}/api/config", headers=self._headers, timeout=TIMEOUT
-                ) as resp:
-                    if resp.status == 403:
-                        raise AupingAuthError("Schlüssel abgelehnt")
-                    if resp.status != 200:
-                        raise AupingError(f"HTTP {resp.status}")
-                    text = await resp.text()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                raise AupingError(str(err)) from err
+            status, text, _ = await self._request("GET", "/api/config")
+        if status == 403:
+            raise AupingAuthError("Schlüssel abgelehnt")
+        if status != 200:
+            raise AupingError(f"HTTP {status}")
         try:
             return json.loads(text)
         except ValueError as err:
@@ -104,22 +128,12 @@ class AupingConnectApi:
         """POST /api/cbu/motor/extended. Gibt den geschätzten Startzeitpunkt (monotonic) zurück."""
         body = self.build_motor_body(cbu, motors)
         async with self._lock:
-            sent = time.monotonic()
-            try:
-                async with self._session.post(
-                    f"http://{self.host}/api/cbu/motor/extended",
-                    headers=self._headers,
-                    json=body,
-                    timeout=TIMEOUT,
-                ) as resp:
-                    await resp.read()
-                    if resp.status == 403:
-                        raise AupingAuthError("Schlüssel abgelehnt")
-                    if resp.status >= 300:
-                        raise AupingError(f"HTTP {resp.status}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                raise AupingError(str(err)) from err
+            status, _, sent = await self._request("POST", "/api/cbu/motor/extended", body)
             done = time.monotonic()
+        if status == 403:
+            raise AupingAuthError("Schlüssel abgelehnt")
+        if status >= 300:
+            raise AupingError(f"HTTP {status}")
         rtt = done - sent
         self.last_rtt_ms = rtt * 1000
         _LOGGER.debug("Motorbefehl %s (%.0f ms)", body, rtt * 1000)

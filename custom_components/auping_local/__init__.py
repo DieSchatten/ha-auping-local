@@ -276,6 +276,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AupingConfigEntry) -> bo
         device_info=device_info,
         version=await hass.async_add_executor_job(read_version),
     )
+    websocket.async_attach(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await panel.async_register(hass)
     return True
