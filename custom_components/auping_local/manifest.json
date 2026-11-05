@@ -1,0 +1,29 @@
+{
+  "domain": "auping_local",
+  "name": "Auping Bett (lokal)",
+  "after_dependencies": [
+    "network"
+  ],
+  "codeowners": [
+    "@DieSchatten"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/DieSchatten/ha-auping-local",
+  "integration_type": "device",
+  "iot_class": "assumed_state",
+  "issue_tracker": "https://github.com/DieSchatten/ha-auping-local/issues",
+  "requirements": [],
+  "version": "0.5.0",
+  "zeroconf": [
+    {
+      "type": "_http._tcp.local.",
+      "name": "auping connect*"
+    }
+  ]
+}
